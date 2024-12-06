@@ -22,7 +22,7 @@ const (
 
 type Server struct {
 	// Membership list stored as a map from server address to member details.
-	membershipList map[Member]MemberData
+	membershipList map[Member]*MemberData
 
 	onMembershipInit func()
 	onRemoveMember   func(string)
@@ -50,7 +50,7 @@ func NewServer(hostname string) *Server {
 	currentServer := Member{hostname, time.Now()}
 
 	return &Server{
-		membershipList:  make(map[Member]MemberData),
+		membershipList:  make(map[Member]*MemberData),
 		currentServer:   currentServer,
 		useSus:          true,
 		receivedJoinAck: currentServer.Address == introducerServerAddress, // don't need JOIN_ACK if we are the introducer
@@ -197,41 +197,40 @@ func (s *Server) RunPeriodicPings() {
 		}
 		log.Printf("Sent PING to %s\n", target.Address)
 
+		targetMemberData := s.membershipList[target]
+
 		// Await an ack response with a timeout.
 		select {
-		case <-s.membershipList[target].Ack:
-			if s.useSus && s.membershipList[target].Status == MEMBER_SUSPECT {
-				m := s.membershipList[target]
-				m.Status = MEMBER_CONNECTED
-				s.membershipList[target] = m
-				s.updates.push(MemberUpdate{UPDATE_ALIVE, target, m.Incarnation, time.Now()}, s.useSus)
+		case <-targetMemberData.Ack:
+			if s.useSus && targetMemberData.Status == MEMBER_SUSPECT {
+				targetMemberData.Status = MEMBER_CONNECTED
+				s.updates.push(MemberUpdate{UPDATE_ALIVE, target, targetMemberData.Incarnation, time.Now()}, s.useSus)
 			}
 		case <-time.After(protocolPeriod - 200*time.Millisecond):
 			if s.useSus {
-				log.Printf("Didn't receive an ACK from %s. Marking as Suspect\n", target.Address)
+				if targetMemberData.Status == MEMBER_CONNECTED {
+					log.Printf("Didn't receive an ACK from %s. Marking as Suspect\n", target.Address)
 
-				fmt.Printf("Marking %s as Suspect!!\n", target.Address)
+					fmt.Printf("Marking %s as Suspect!!\n", target.Address)
 
-				// Update status
-				m := s.membershipList[target]
-				m.Status = MEMBER_SUSPECT
-				s.membershipList[target] = m
+					// Update status
+					targetMemberData.Status = MEMBER_SUSPECT
 
-				// Add update to buffer.
-				s.updates.push(MemberUpdate{UPDATE_SUSPECT, target, m.Incarnation, time.Now()}, s.useSus)
+					// Add update to buffer.
+					s.updates.push(MemberUpdate{UPDATE_SUSPECT, target, targetMemberData.Incarnation, time.Now()}, s.useSus)
 
-				go func() {
-					time.Sleep(protocolPeriod * 2)
-					m := s.membershipList[target]
-					if m.Status == MEMBER_SUSPECT {
-						log.Printf("Didn't receive an ALIVE for %s. Marking as failed\n", target.Address)
-						// Remove member from membership list
-						s.removeMember(target)
+					go func() {
+						time.Sleep(protocolPeriod * 2)
+						if targetMemberData.Status == MEMBER_SUSPECT {
+							log.Printf("Didn't receive an ALIVE for %s. Marking as failed\n", target.Address)
+							// Remove member from membership list
+							s.removeMember(target)
 
-						// Add update to buffer.
-						s.updates.push(MemberUpdate{UPDATE_FAILED, target, m.Incarnation, time.Now()}, s.useSus)
-					}
-				}()
+							// Add update to buffer.
+							s.updates.push(MemberUpdate{UPDATE_FAILED, target, targetMemberData.Incarnation, time.Now()}, s.useSus)
+						}
+					}()
+				}
 			} else {
 				log.Printf("Didn't receive an ACK from %s. Marking as failed\n", target.Address)
 
@@ -241,7 +240,7 @@ func (s *Server) RunPeriodicPings() {
 				s.removeMember(target)
 
 				// Add update to buffer.
-				s.updates.push(MemberUpdate{UPDATE_FAILED, target, s.membershipList[target].Incarnation, time.Now()}, s.useSus)
+				s.updates.push(MemberUpdate{UPDATE_FAILED, target, targetMemberData.Incarnation, time.Now()}, s.useSus)
 			}
 		}
 
@@ -335,18 +334,14 @@ func (s *Server) processMembershipUpdates() {
 			}
 		case UPDATE_SUSPECT:
 			// Mark machine as suspect.
-			if _, ok := s.membershipList[u.Member]; ok {
-				d := s.membershipList[u.Member]
+			if d, ok := s.membershipList[u.Member]; ok && d.Status != MEMBER_SUSPECT {
 				d.Status = MEMBER_SUSPECT
-				s.membershipList[u.Member] = d
 			}
 		case UPDATE_ALIVE:
 			// Unmark machine from being suspect.
-			if _, ok := s.membershipList[u.Member]; ok {
-				d := s.membershipList[u.Member]
+			if d, ok := s.membershipList[u.Member]; ok {
 				d.Status = MEMBER_CONNECTED
 				d.Incarnation = u.Incarnation
-				s.membershipList[u.Member] = d
 			}
 		case UPDATE_DISABLE_SUS:
 			s.useSus = false
@@ -375,7 +370,7 @@ func (s *Server) addMember(target Member) {
 	fmt.Printf("Adding member %s.\n", target.Address)
 
 	// Add to membership list.
-	s.membershipList[target] = MemberData{MEMBER_CONNECTED, 0, make(chan struct{}, 10)}
+	s.membershipList[target] = &MemberData{MEMBER_CONNECTED, 0, make(chan struct{}, 10)}
 	if s.receivedJoinAck {
 		s.onAddMember(target.Address)
 	}

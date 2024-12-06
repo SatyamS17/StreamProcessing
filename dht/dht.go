@@ -161,14 +161,14 @@ func (s *Server) HandlePacket(p Packet) {
 		log.Printf("Received ACK from %s\n", p.Source)
 		m <- struct{}{}
 	case PACKET_GET:
-		fmt.Println("Responding to get")
+		log.Println("Responding to get")
 		chunks := s.files[p.FileName]
 		ackP := NewGetAckPacket(s.membershipServer.CurrentServer().Address, chunks)
 		if err := util.SendTCPPacket(ackP, p.Source, portNumber); err != nil {
 			log.Println("Unable to send ACK")
 			return
 		}
-		fmt.Println("Done responding")
+		log.Println("Done responding")
 	case PACKET_GET_ACK:
 		m, ok := s.acks[p.Source]
 		if !ok {
