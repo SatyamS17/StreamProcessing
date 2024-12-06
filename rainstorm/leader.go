@@ -3,11 +3,12 @@ package rainstorm
 import (
 	"fmt"
 	"mp4/membership"
-	"net/rpc"
+	"sync"
 )
 
 func Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int) {
 	machineAssignments := MachineAssignments{
+		membershipServer.CurrentServer().Address,
 		make([]string, numTasks),
 		make([]string, numTasks),
 		make([]string, numTasks),
@@ -32,19 +33,18 @@ func Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydf
 		machineAssignments,
 	}
 
+	var wg sync.WaitGroup
 	for _, member := range members {
-		client, err := rpc.DialHTTP("tcp", member.Address+":"+rpcPortNumber)
-		if err != nil {
-			fmt.Println("lakewfj")
-			continue
-		}
-
-		args := &SetCommandArgs{command}
-		var reply struct{}
-		err = client.Call("WorkerServer.SetCommand", args, &reply)
-		if err != nil {
-			fmt.Println("kwalej")
-			continue
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args := &SetCommandArgs{command}
+			err := rpcCall(member.Address, "Server.SetCommand", args)
+			if err != nil {
+				fmt.Println(err)
+			}
+		}()
 	}
+
+	wg.Wait()
 }

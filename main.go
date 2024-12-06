@@ -32,7 +32,7 @@ func main() {
 		log.Fatal("Unable to create DHT server.", err)
 	}
 
-	rainstormWorkerServer := rainstorm.NewWorkerServer()
+	rainstormServer := rainstorm.NewServer(dhtServer)
 
 	file, err := openLogFile(util.AddressToID(membershipServer.CurrentServer().Address))
 	if err != nil {
@@ -43,7 +43,7 @@ func main() {
 	go membershipServer.RunUDPServer()
 	go dhtServer.RunHTTPServer()
 	go dhtServer.RunTCPServer()
-	go rainstormWorkerServer.RunRPCServer()
+	go rainstormServer.RunRPCServer()
 
 	time.Sleep(500 * time.Millisecond)
 

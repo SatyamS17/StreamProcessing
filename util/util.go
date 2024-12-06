@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
@@ -177,6 +178,11 @@ func HashFile(filePath string, hashFunc func() hash.Hash) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+func HashLine(line string) int {
+	hash := sha256.Sum256([]byte(line))
+	return 1 + int(hash[0])%10
 }
 
 func SwapFiles(file1 string, file2 string) {

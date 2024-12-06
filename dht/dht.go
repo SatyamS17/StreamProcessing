@@ -113,6 +113,10 @@ func (s *Server) RunTCPServer() {
 	}
 }
 
+func (s *Server) Membership() *membership.Server {
+	return s.membershipServer
+}
+
 func (s *Server) HandlePacket(p Packet) {
 	switch p.T {
 	case PACKET_ADD:
