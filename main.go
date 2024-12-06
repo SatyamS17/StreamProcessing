@@ -6,6 +6,7 @@ import (
 	"log"
 	"mp4/dht"
 	"mp4/membership"
+	"mp4/rainstorm"
 	"mp4/util"
 	"os"
 	"sort"
@@ -31,6 +32,8 @@ func main() {
 		log.Fatal("Unable to create DHT server.", err)
 	}
 
+	rainstormWorkerServer := rainstorm.NewWorkerServer()
+
 	file, err := openLogFile(util.AddressToID(membershipServer.CurrentServer().Address))
 	if err != nil {
 		log.Fatalf("Could not open log file: %v", err)
@@ -40,6 +43,7 @@ func main() {
 	go membershipServer.RunUDPServer()
 	go dhtServer.RunHTTPServer()
 	go dhtServer.RunTCPServer()
+	go rainstormWorkerServer.RunRPCServer()
 
 	time.Sleep(500 * time.Millisecond)
 
@@ -186,6 +190,19 @@ func main() {
 				continue
 			}
 			dhtServer.Merge(text[1])
+		case "RainStorm":
+			if len(text) < 6 {
+				fmt.Println("Missing parameters")
+				continue
+			}
+
+			numTasks, err := strconv.Atoi(text[5])
+			if err != nil {
+				fmt.Println("Invalid numTasks")
+				continue
+			}
+
+			rainstorm.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks)
 		default:
 			fmt.Printf("Invalid command\n")
 		}

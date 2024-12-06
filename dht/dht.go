@@ -126,8 +126,6 @@ func (s *Server) HandlePacket(p Packet) {
 		url := fmt.Sprintf("http://%s:%s/%d", p.Source, httpPortNumber, util.Hash(p.FileName))
 		to := fmt.Sprintf("%s/%d+%d", dataDir, util.Hash(p.FileName), s.files[p.FileName])
 
-		fmt.Printf("Responding to create/append (%d.%03d)\n", time.Now().Unix(), time.Now().Nanosecond()/1e6)
-
 		if err := util.DownloadFile(url, to); err != nil {
 			fmt.Printf("Unable to download file from %s to %s. %v\n", url, to, err)
 			s.lock.Unlock()
@@ -151,7 +149,6 @@ func (s *Server) HandlePacket(p Packet) {
 			return
 		}
 
-		fmt.Println("Done responding")
 	case PACKET_ADD_ACK:
 		m, ok := s.acks[p.Source]
 		if !ok {
