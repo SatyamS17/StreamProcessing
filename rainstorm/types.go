@@ -1,5 +1,7 @@
 package rainstorm
 
+import "fmt"
+
 type Command struct {
 	Op1Exe        string
 	Op2Exe        string
@@ -28,4 +30,8 @@ type Record struct {
 	ID    string
 	Key   string
 	Value string
+}
+
+func (r *Record) String() string {
+	return fmt.Sprintf("<%s, %s>", r.Key, r.Value)
 }

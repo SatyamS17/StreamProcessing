@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/rpc"
 	"os"
 	"regexp"
 	"strconv"
@@ -133,6 +134,22 @@ func sendPacket(p interface{}, address string, port string, network string) erro
 		return err
 	}
 
+	return nil
+}
+
+func RpcCall(address string, portNum string, function string, args any) error {
+	client, err := rpc.DialHTTP("tcp", address+":"+portNum)
+	if err != nil {
+		return err
+	}
+
+	var reply struct{}
+	err = client.Call(function, args, &reply)
+
+	// TODO retry if timeout
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

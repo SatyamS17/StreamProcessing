@@ -3,6 +3,7 @@ package rainstorm
 import (
 	"fmt"
 	"mp4/membership"
+	"mp4/util"
 	"sync"
 )
 
@@ -39,7 +40,7 @@ func Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydf
 		go func() {
 			defer wg.Done()
 			args := &SetCommandArgs{command}
-			err := rpcCall(member.Address, "Server.SetCommand", args)
+			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetCommand", args)
 			if err != nil {
 				fmt.Println(err)
 			}

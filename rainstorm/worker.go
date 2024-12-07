@@ -27,10 +27,12 @@ type Server struct {
 
 	command            *Command
 	processedRecordIDs map[string]struct{}
+
+	outputBatchLogger *BatchLogger
 }
 
 func NewServer(dhtServer *dht.Server) *Server {
-	s := Server{dhtServer, nil, make(map[string]struct{})}
+	s := Server{dhtServer, nil, make(map[string]struct{}), nil}
 	return &s
 }
 
@@ -54,6 +56,8 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 
 	if slices.Contains(s.command.Assignments.SourceMachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
 		go s.Source()
+	} else if slices.Contains(s.command.Assignments.Op2MachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
+		s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile)
 	}
 
 	return nil
@@ -106,15 +110,19 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 			for _, record := range records {
 				nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%len(s.command.Assignments.Op2MachineAddresses)]
 				args := ProcessRecordArgs{currentStage, record}
-				err := rpcCall(nextStageServerAddress, "Server.ProcessRecord", args)
+				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
 				if err != nil {
 					fmt.Println(err)
 				}
 			}
 		} else if currentStage == Op2Stage {
 			for _, record := range records {
+				// Log to DFS
+				s.outputBatchLogger.Append(record.String())
+
+				// Send record to leader
 				args := OutputRecordArgs{record}
-				err := rpcCall(s.command.Assignments.LeaderMachineAddress, "Server.OutputRecord", args)
+				err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args)
 				if err != nil {
 					fmt.Println(err)
 				}
@@ -161,7 +169,7 @@ func (s *Server) Source() {
 			// Use hash to send to right machine
 			nextStageServerAddress := s.command.Assignments.Op1MachineAddresses[hashLine%len(s.command.Assignments.Op1MachineAddresses)]
 			args := ProcessRecordArgs{SourceStage, record}
-			err := rpcCall(nextStageServerAddress, "Server.ProcessRecord", args)
+			err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
 
 			if err != nil {
 				fmt.Println("uh oh")
@@ -179,6 +187,6 @@ type OutputRecordArgs struct {
 }
 
 func (s *Server) OutputRecord(args *OutputRecordArgs, reply *struct{}) error {
-	fmt.Println(args.Record)
+	fmt.Println(args.Record.String())
 	return nil
 }
