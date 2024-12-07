@@ -28,6 +28,8 @@ type Server struct {
 	onRemoveMember   func(string)
 	onAddMember      func(string)
 
+	onRemoveWorker func(string)
+
 	// Shuffled list of servers to ping.
 	serversToPing []Member
 
@@ -264,6 +266,10 @@ func (s *Server) OnRemoveMember(f func(string)) {
 	s.onRemoveMember = f
 }
 
+func (s *Server) OnRemoveWorker(f func(string)) {
+	s.onRemoveWorker = f
+}
+
 func (s *Server) OnAddMember(f func(string)) {
 	s.onAddMember = f
 }
@@ -358,6 +364,7 @@ func (s *Server) removeMember(target Member) {
 	// Remove from membership list.
 	delete(s.membershipList, target)
 	s.onRemoveMember(target.Address)
+	s.onRemoveWorker(target.Address)
 
 	// Remove from shuffled list of servers to ping if present.
 	s.serversToPing = slices.DeleteFunc(s.serversToPing, func(m Member) bool {
