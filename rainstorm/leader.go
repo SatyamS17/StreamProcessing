@@ -10,20 +10,18 @@ import (
 func Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int) {
 	machineAssignments := MachineAssignments{
 		membershipServer.CurrentServer().Address,
-		make([]string, numTasks),
-		make([]string, numTasks),
-		make([]string, numTasks),
+		make(map[int]string),
+		make(map[int]string),
+		make(map[int]string),
+		make(map[string]struct{}),
 	}
 
 	members := membershipServer.Members()
 	i := 0
 	for taskIdx := range numTasks {
-		machineAssignments.SourceMachineAddresses[taskIdx] = members[i].Address
-		i = (i + 1) % len(members)
-		machineAssignments.Op1MachineAddresses[taskIdx] = members[i].Address
-		i = (i + 1) % len(members)
-		machineAssignments.Op2MachineAddresses[taskIdx] = members[i].Address
-		i = (i + 1) % len(members)
+		assignMachine(taskIdx, machineAssignments.SourceMachineAddresses, members, machineAssignments.AssignedMachines, &i)
+		assignMachine(taskIdx, machineAssignments.Op1MachineAddresses, members, machineAssignments.AssignedMachines, &i)
+		assignMachine(taskIdx, machineAssignments.Op2MachineAddresses, members, machineAssignments.AssignedMachines, &i)
 	}
 
 	command := Command{
@@ -48,4 +46,11 @@ func Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydf
 	}
 
 	wg.Wait()
+}
+
+func assignMachine(taskIdx int, addressField map[int]string, members []membership.Member, assignedMachines map[string]struct{}, i *int) {
+	address := members[*i].Address
+	addressField[taskIdx] = address
+	assignedMachines[address] = struct{}{}
+	*i = (*i + 1) % len(members)
 }

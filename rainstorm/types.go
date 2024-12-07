@@ -13,9 +13,11 @@ type Command struct {
 
 type MachineAssignments struct {
 	LeaderMachineAddress   string
-	SourceMachineAddresses []string
-	Op1MachineAddresses    []string
-	Op2MachineAddresses    []string
+	SourceMachineAddresses map[int]string
+	Op1MachineAddresses    map[int]string
+	Op2MachineAddresses    map[int]string
+
+	AssignedMachines map[string]struct{}
 }
 
 type Stage int
@@ -32,6 +34,20 @@ type Record struct {
 	Value string
 }
 
-func (r *Record) String() string {
-	return fmt.Sprintf("<%s, %s>", r.Key, r.Value)
+type RecordStatus int
+
+const (
+	RECEIVED RecordStatus = iota
+	OUTPUTTED
+	ACKED
+
+	PROCESSED
+)
+
+func (r *Record) String(status RecordStatus) string {
+	if status != PROCESSED {
+		return fmt.Sprintf("%s:%s<%s, %s>\n", r.ID, status, r.Key, r.Value)
+	} else {
+		return fmt.Sprintf("<%s, %s>\n", r.Key, r.Value)
+	}
 }

@@ -11,7 +11,6 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -24,6 +23,7 @@ const (
 
 type Server struct {
 	dhtServer *dht.Server
+	address   string
 
 	command            *Command
 	processedRecordIDs map[string]struct{}
@@ -32,7 +32,7 @@ type Server struct {
 }
 
 func NewServer(dhtServer *dht.Server) *Server {
-	s := Server{dhtServer, nil, make(map[string]struct{}), nil}
+	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil}
 	return &s
 }
 
@@ -54,9 +54,10 @@ type SetCommandArgs struct {
 func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 	s.command = &args.Command
 
-	if slices.Contains(s.command.Assignments.SourceMachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
+	// Check if current server in source machine
+	if s.isAddressInMap(s.command.Assignments.SourceMachineAddresses, s.address) {
 		go s.Source()
-	} else if slices.Contains(s.command.Assignments.Op2MachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
+	} else if s.isAddressInMap(s.command.Assignments.Op2MachineAddresses, s.address) {
 		s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile)
 	}
 
@@ -70,9 +71,9 @@ type ProcessRecordArgs struct {
 
 func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 	var currentStage Stage
-	if args.FromStage == SourceStage && slices.Contains(s.command.Assignments.Op1MachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
+	if args.FromStage == SourceStage && s.isAddressInMap(s.command.Assignments.Op1MachineAddresses, s.address) {
 		currentStage = Op1Stage
-	} else if args.FromStage == Op1Stage && slices.Contains(s.command.Assignments.Op2MachineAddresses, s.dhtServer.Membership().CurrentServer().Address) {
+	} else if args.FromStage == Op1Stage && s.isAddressInMap(s.command.Assignments.Op2MachineAddresses, s.address) {
 		currentStage = Op2Stage
 	} else {
 		fmt.Println("asdf")
@@ -86,6 +87,9 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 	}
 
 	s.processedRecordIDs[args.Record.ID] = struct{}{}
+
+	// Log RECEIVED to DFS
+	s.outputBatchLogger.Append(args.Record.String(RECEIVED))
 
 	// Perform op
 	opCmd := s.command.Op1Exe
@@ -107,17 +111,24 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 	go func() {
 		if currentStage == Op1Stage {
 			for _, record := range records {
-				nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%len(s.command.Assignments.Op2MachineAddresses)]
+				// Log OUTPUTTED to DFS
+				s.outputBatchLogger.Append(record.String(OUTPUTTED))
+
+				// Send record to op2
+				nextStageServerAddress := s.GetTaskAddressFromIndex(s.command.Assignments.Op2MachineAddresses, util.Hash(record.Key))
 				args := ProcessRecordArgs{currentStage, record}
 				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
 				if err != nil {
 					fmt.Println(err)
 				}
+
+				// Log ACK to DFS
+				s.outputBatchLogger.Append(record.String(ACKED))
 			}
 		} else if currentStage == Op2Stage {
 			for _, record := range records {
-				// Log to DFS
-				s.outputBatchLogger.Append(record.String() + "\n")
+				// Log OUTPUTTED to DFS
+				s.outputBatchLogger.Append(record.String(OUTPUTTED))
 
 				// Send record to leader
 				args := OutputRecordArgs{record}
@@ -125,6 +136,9 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 				if err != nil {
 					fmt.Println(err)
 				}
+
+				// Log ACK to DFS
+				s.outputBatchLogger.Append(record.String(ACKED))
 			}
 		}
 	}()
@@ -138,12 +152,7 @@ func (s *Server) Source() {
 	s.dhtServer.Get(s.command.HydfsSrcFile, localFileName)
 
 	// Get server index
-	index := 0
-	for i, address := range s.command.Assignments.SourceMachineAddresses {
-		if address == s.dhtServer.Membership().CurrentServer().Address {
-			index = i
-		}
-	}
+	index := s.GetTaskIndexFromAddress(s.command.Assignments.SourceMachineAddresses, s.address)
 
 	// Read file line by line and send tuples
 	file, err := os.Open(localFileName)
@@ -163,10 +172,11 @@ func (s *Server) Source() {
 
 		if hashLine%len(s.command.Assignments.SourceMachineAddresses) == index {
 			// Format record
-			record := Record{uuid.NewString(), strconv.Itoa(lineNumber), line}
+			key := fmt.Sprintf("%s:%s", s.command.HydfsSrcFile, strconv.Itoa(lineNumber))
+			record := Record{uuid.NewString(), key, line}
 
 			// Use hash to send to right machine
-			nextStageServerAddress := s.command.Assignments.Op1MachineAddresses[hashLine%len(s.command.Assignments.Op1MachineAddresses)]
+			nextStageServerAddress := s.GetTaskAddressFromIndex(s.command.Assignments.Op1MachineAddresses, hashLine)
 			args := ProcessRecordArgs{SourceStage, record}
 			err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
 
@@ -186,6 +196,6 @@ type OutputRecordArgs struct {
 }
 
 func (s *Server) OutputRecord(args *OutputRecordArgs, reply *struct{}) error {
-	fmt.Println(args.Record.String())
+	fmt.Println(args.Record.String(PROCESSED))
 	return nil
 }

@@ -75,6 +75,11 @@ func NewServer(membershipServer *membership.Server) (*Server, error) {
 	return &s, nil
 }
 
+// Get current server address
+func (s *Server) GetCurrentServerAddress() string {
+	return s.membershipServer.CurrentServer().Address
+}
+
 // Run TCP server to handle DHT packets.
 func (s *Server) RunTCPServer() {
 	pc, err := net.Listen("tcp", ":"+portNumber)

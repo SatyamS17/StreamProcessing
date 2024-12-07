@@ -27,6 +27,6 @@ go.work.sum
 
 # machine specific log files
 machine.[0-9]*.log
-
+*.txt
 mp4
 .DS_Store
