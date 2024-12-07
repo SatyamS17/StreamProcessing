@@ -5,6 +5,7 @@ import (
 	"log"
 	"mp4/dht"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -15,11 +16,18 @@ type BatchLogger struct {
 	dfsFileName   string
 	localFileName string
 
+	mu sync.Mutex
+
 	stop chan struct{}
 }
 
 func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
-	b := BatchLogger{dhtServer, dfsFileName, dfsFileName + ".tmp", make(chan struct{})}
+	b := BatchLogger{
+		dhtServer:     dhtServer,
+		dfsFileName:   dfsFileName,
+		localFileName: dfsFileName + ".tmp",
+		stop:          make(chan struct{}),
+	}
 
 	f, err := os.Create(b.localFileName)
 	if err != nil {
@@ -46,7 +54,8 @@ func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
 }
 
 func (b *BatchLogger) Append(data string) {
-	f, err := os.OpenFile("access.log", os.O_APPEND|os.O_WRONLY, 0644)
+	b.mu.Lock()
+	f, err := os.OpenFile(b.localFileName, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,6 +65,7 @@ func (b *BatchLogger) Append(data string) {
 	if err := f.Close(); err != nil {
 		log.Fatal(err)
 	}
+	b.mu.Unlock()
 }
 
 func (b *BatchLogger) Stop() {
@@ -69,7 +79,9 @@ func (b *BatchLogger) flush() {
 	}
 
 	if fi.Size() > 0 {
+		b.mu.Lock()
 		b.dhtServer.Append(b.localFileName, b.dfsFileName)
 		os.Truncate(b.localFileName, 0)
+		b.mu.Unlock()
 	}
 }

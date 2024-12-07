@@ -99,7 +99,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 	}
 
 	outSplit := strings.Split(strings.TrimSpace(string(out)), "\n")
-	fmt.Println(outSplit)
 	records := make([]Record, len(outSplit)/2)
 	for i := 0; i < len(outSplit); i += 2 {
 		records[i/2] = Record{uuid.NewString(), outSplit[i], outSplit[i+1]}
@@ -118,7 +117,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 		} else if currentStage == Op2Stage {
 			for _, record := range records {
 				// Log to DFS
-				s.outputBatchLogger.Append(record.String())
+				s.outputBatchLogger.Append(record.String() + "\n")
 
 				// Send record to leader
 				args := OutputRecordArgs{record}
