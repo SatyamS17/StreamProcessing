@@ -1,19 +1,5 @@
 package rainstorm
 
-// func rpcCall(address string, function string, args any) error {
-// 	client, err := rpc.DialHTTP("tcp", address+":"+rpcPortNumber)
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	var reply struct{}
-// 	err = client.Call(function, args, &reply)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return nil
-// }
-
 func (s *Server) GetTaskIndexesFromAddress(addresses []string, address string) []int {
 	var indexes []int
 	for key, value := range addresses {
@@ -22,19 +8,6 @@ func (s *Server) GetTaskIndexesFromAddress(addresses []string, address string) [
 		}
 	}
 	return indexes
-}
-
-func (m *MachineAssignments) getStageMap(address string) ([]string, Stage) {
-	switch {
-	case m.isSourceMachine(address):
-		return m.SourceMachineAddresses, SourceStage
-	case m.isSourceMachine(address):
-		return m.Op1MachineAddresses, SourceStage
-	case m.isSourceMachine(address):
-		return m.Op2MachineAddresses, SourceStage
-	default:
-		return nil, 0
-	}
 }
 
 func (status RecordStatus) String() string {
