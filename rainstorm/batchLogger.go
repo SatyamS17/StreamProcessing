@@ -54,6 +54,12 @@ func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
 }
 
 func (b *BatchLogger) Append(data string) {
+	if b == nil {
+		fmt.Println("LOGGER IS NULL")
+		log.Fatal("Logger is null")
+		return
+	}
+
 	b.mu.Lock()
 	f, err := os.OpenFile(b.localFileName, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {

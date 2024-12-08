@@ -15,5 +15,5 @@ pattern = sys.argv[5]
 values = value.split(",")
 
 if pattern in value:
-    print(values[6])    # Key
-    print(values[8])    # Value
+    print(values[8])    # Key
+    print(1)    # Value
