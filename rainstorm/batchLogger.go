@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const flushPeriod = 1 * time.Second
+const flushPeriod = 1000 * time.Millisecond
 
 type BatchLogger struct {
 	dhtServer     *dht.Server
@@ -69,6 +69,7 @@ func (b *BatchLogger) Append(data string) {
 }
 
 func (b *BatchLogger) Stop() {
+	b.flush()
 	b.stop <- struct{}{}
 }
 
@@ -80,8 +81,12 @@ func (b *BatchLogger) flush() {
 
 	if fi.Size() > 0 {
 		b.mu.Lock()
-		b.dhtServer.Append(b.localFileName, b.dfsFileName)
-		os.Truncate(b.localFileName, 0)
+		err := b.dhtServer.Append(b.localFileName, b.dfsFileName)
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			os.Truncate(b.localFileName, 0)
+		}
 		b.mu.Unlock()
 	}
 }

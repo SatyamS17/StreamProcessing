@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"mp4/dht"
+	"mp4/membership"
 	"mp4/util"
 	"net"
 	"net/http"
@@ -13,8 +14,11 @@ import (
 	"os/exec"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -24,20 +28,20 @@ const (
 )
 
 type Server struct {
-	dhtServer *dht.Server
-	address   string
+	dhtServer            *dht.Server
+	currentServerAddress string
 
 	command            *Command
 	processedRecordIDs map[string]struct{}
 
-	outputBatchLogger *BatchLogger
+	outputBatchLogger     *BatchLogger
+	operationsBatchLogger *BatchLogger
+
+	prevStageMachinesDone int
 }
 
 func NewServer(dhtServer *dht.Server) *Server {
-	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil}
-
-	// register failed worker callback
-	s.dhtServer.Membership().OnRemoveWorker(s.HandleFailedWorker)
+	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil, nil, 0}
 	return &s
 }
 
@@ -52,44 +56,203 @@ func (s *Server) RunRPCServer() {
 	http.Serve(l, nil)
 }
 
+func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int) {
+	machineAssignments := MachineAssignments{
+		membershipServer.CurrentServer().Address,
+		make([]string, numTasks),
+		make([]string, numTasks),
+		make([]string, numTasks),
+	}
+
+	members := membershipServer.Members()
+	i := 0
+	for taskIdx := range numTasks {
+		machineAssignments.SourceMachineAddresses[taskIdx] = members[i].Address
+		i = (i + 1) % len(members)
+		machineAssignments.Op1MachineAddresses[taskIdx] = members[i].Address
+		i = (i + 1) % len(members)
+		machineAssignments.Op2MachineAddresses[taskIdx] = members[i].Address
+		i = (i + 1) % len(members)
+	}
+
+	fmt.Printf("Source machines: %v\n", machineAssignments.SourceMachineAddresses)
+	fmt.Printf("Op1 machines: %v\n", machineAssignments.Op1MachineAddresses)
+	fmt.Printf("Op2 machines: %v\n", machineAssignments.Op2MachineAddresses)
+
+	s.command = &Command{
+		uuid.NewString(),
+		op1Exe,
+		op2Exe,
+		hydfsSrcFile,
+		hydfsDestFile,
+		numTasks,
+		machineAssignments,
+	}
+
+	// Register callback
+	s.dhtServer.Membership().OnRemoveWorker(s.HandleFailedWorker)
+
+	var wg sync.WaitGroup
+	for _, member := range members {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args := &SetCommandArgs{*s.command}
+			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetCommand", args, &struct{}{})
+			if err != nil {
+				fmt.Println(err)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	fmt.Println("Assigned tasks to all workers")
+
+}
+
 type SetCommandArgs struct {
 	Command Command
 }
 
 func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
+	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt")
+	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
+		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile)
+	}
+
 	s.command = &args.Command
 
-	// Check if current server in source machine
-	if s.isAddressInMap(s.command.Assignments.SourceMachineAddresses, s.address) {
+	if s.command.Assignments.isSourceMachine(s.currentServerAddress) {
 		go s.Source()
-	} else if s.isAddressInMap(s.command.Assignments.Op2MachineAddresses, s.address) {
-		s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile)
+	}
+	return nil
+}
+
+type SetNewAssignmentsArgs struct {
+	NewAssignemnts MachineAssignments
+
+	NewAssignedTasks []Task
+}
+
+func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{}) error {
+	s.command.Assignments = args.NewAssignemnts
+
+	// Check if we were assigned any new tasks. If so, we have to parse through the ops log
+
+	// Parse log file and find all work that still needs to be done from the old failed machine
+	localFileName := "oldLogs.txt"
+	s.dhtServer.Get(s.command.ID+"_ops.txt", localFileName)
+
+	file, err := os.Open(localFileName)
+	if err != nil {
+		fmt.Printf("Error opening file: %v\n", err)
+		return nil
+	}
+	defer file.Close()
+
+	// Parse file
+	scanner := bufio.NewScanner(file)
+
+	pattern := `(\S+):(\S+):(\S+)<(\S+),(\S+)>`
+	re := regexp.MustCompile(pattern)
+
+	// Keep track of each status
+	outputted := make(map[Record]string)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := re.FindStringSubmatch(line)
+
+		if len(matches) > 0 {
+			// Extract values from the string
+			ID := matches[1]     // ID
+			status := matches[2] // status
+			stage := matches[3]  // stage
+			key := matches[4]    // Key
+			value := matches[5]  // Value
+
+			// Determine if tuple belongs to this machine | Check correct stage and correct index
+			for _, task := range args.NewAssignedTasks {
+				if task.Stage.String() == stage && util.Hash(key)%s.command.NumTasks == task.Index {
+					switch status {
+					case "RECEIVED":
+						s.processedRecordIDs[ID] = struct{}{}
+					case "OUTPUTTED":
+						// Add to outputted
+						outputted[Record{ID, key, value}] = stage
+					case "ACKED":
+						// Delete from outputted
+						delete(outputted, Record{ID, key, value})
+					default:
+						fmt.Println("Invalid state")
+					}
+				}
+			}
+
+		}
+	}
+
+	for record, stage := range outputted {
+		switch stage {
+		case "SOURCE":
+			fmt.Println("oops")
+		case "OP1":
+			nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
+			args := ProcessRecordArgs{Op1Stage, record}
+			err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &struct{}{})
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			// Log ACK to DFS
+			s.operationsBatchLogger.Append(record.String(ACKED, Op1Stage))
+		case "OP2":
+			// Send record to leader
+			args := OutputRecordArgs{record}
+			err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			// Log to output file
+			s.outputBatchLogger.Append(record.String(PROCESSED, 0))
+
+			// Log ACK to DFS
+			s.operationsBatchLogger.Append(record.String(ACKED, Op2Stage))
+		}
 	}
 
 	return nil
 }
 
-func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
+func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
+	if s.command == nil {
+		*reply = false
+		return nil
+	}
+
 	var currentStage Stage
-	if args.FromStage == SourceStage && s.isAddressInMap(s.command.Assignments.Op1MachineAddresses, s.address) {
+	if args.FromStage == SourceStage && s.command.Assignments.isOp1Machine(s.currentServerAddress) {
 		currentStage = Op1Stage
-	} else if args.FromStage == Op1Stage && s.isAddressInMap(s.command.Assignments.Op2MachineAddresses, s.address) {
+	} else if args.FromStage == Op1Stage && s.command.Assignments.isOp2Machine(s.currentServerAddress) {
 		currentStage = Op2Stage
 	} else {
-		fmt.Println("asdf")
+		*reply = false
 		return nil
 	}
 
 	// Check if record is duplicate
 	if _, ok := s.processedRecordIDs[args.Record.ID]; ok {
 		log.Println("Duplicate record - not processing")
+		*reply = true
 		return nil
 	}
 
 	s.processedRecordIDs[args.Record.ID] = struct{}{}
 
 	// Log RECEIVED to DFS
-	s.outputBatchLogger.Append(args.Record.String(RECEIVED, currentStage))
+	s.operationsBatchLogger.Append(args.Record.String(RECEIVED, currentStage))
 
 	// Perform op
 	opCmd := s.command.Op1Exe
@@ -99,6 +262,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 	out, err := exec.Command("./"+opCmd, args.Record.Key, args.Record.Value).Output()
 	if err != nil {
 		fmt.Println(err)
+		*reply = true
 		return nil
 	}
 
@@ -112,37 +276,47 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *struct{}) error {
 		if currentStage == Op1Stage {
 			for _, record := range records {
 				// Log OUTPUTTED to DFS
-				s.outputBatchLogger.Append(record.String(OUTPUTTED, currentStage))
+				s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
 
 				// Send record to op2
-				nextStageServerAddress := s.GetTaskAddressFromIndex(s.command.Assignments.Op2MachineAddresses, util.Hash(record.Key))
-				args := ProcessRecordArgs{currentStage, record}
-				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
-				if err != nil {
-					fmt.Println(err)
+				for {
+					nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
+					args := ProcessRecordArgs{currentStage, record}
+					var ok bool
+					err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
+					if err != nil || !ok {
+						fmt.Println(err)
+						time.Sleep(500 * time.Millisecond)
+					} else {
+						break
+					}
 				}
 
 				// Log ACK to DFS
-				s.outputBatchLogger.Append(record.String(ACKED, currentStage))
+				s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
 			}
 		} else if currentStage == Op2Stage {
 			for _, record := range records {
 				// Log OUTPUTTED to DFS
-				s.outputBatchLogger.Append(record.String(OUTPUTTED, currentStage))
+				s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
 
 				// Send record to leader
 				args := OutputRecordArgs{record}
-				err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args)
+				err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
 				if err != nil {
 					fmt.Println(err)
 				}
 
+				// Log to output file
+				s.outputBatchLogger.Append(record.String(PROCESSED, 0))
+
 				// Log ACK to DFS
-				s.outputBatchLogger.Append(record.String(ACKED, currentStage))
+				// s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
 			}
 		}
 	}()
 
+	*reply = true
 	return nil
 }
 
@@ -152,7 +326,7 @@ func (s *Server) Source() {
 	s.dhtServer.Get(s.command.HydfsSrcFile, localFileName)
 
 	// Get server index
-	indexes := s.GetTaskIndexesFromAddress(s.command.Assignments.SourceMachineAddresses, s.address)
+	indexes := s.GetTaskIndexesFromAddress(s.command.Assignments.SourceMachineAddresses, s.currentServerAddress)
 
 	// Read file line by line and send tuples
 	file, err := os.Open(localFileName)
@@ -170,160 +344,161 @@ func (s *Server) Source() {
 		lineNumber++
 		hashLine := util.HashLine(line)
 
-		for _, index := range indexes {
-			go func() { // TODO: WILL THIS BREAK SHIT?
-				if hashLine%len(s.command.Assignments.SourceMachineAddresses) == index {
-					// Format record
-					key := fmt.Sprintf("%s:%s", s.command.HydfsSrcFile, strconv.Itoa(lineNumber))
-					record := Record{uuid.NewString(), key, line}
+		// go func() { // TODO: WILL THIS BREAK SHIT?
+		if slices.Contains(indexes, hashLine%s.command.NumTasks) {
+			// Format record
+			key := fmt.Sprintf("%s:%s", s.command.HydfsSrcFile, strconv.Itoa(lineNumber))
+			record := Record{uuid.NewString(), key, line}
 
-					// Use hash to send to right machine
-					nextStageServerAddress := s.GetTaskAddressFromIndex(s.command.Assignments.Op1MachineAddresses, util.Hash(record.Key))
-					args := ProcessRecordArgs{SourceStage, record}
-					err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args)
+			// Use hash to send to right machine
+			for {
+				nextStageServerAddress := s.command.Assignments.Op1MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
+				args := ProcessRecordArgs{SourceStage, record}
+				var ok bool
+				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
 
-					if err != nil {
-						fmt.Println("uh oh")
-					}
+				if err != nil || !ok {
+					fmt.Println(err, ok)
+					time.Sleep(500 * time.Millisecond)
+				} else {
+					break
 				}
-			}()
+			}
 		}
+		// }()
 	}
 
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
 	}
+
+	// for _, machine := range s.command.Assignments.Op1MachineAddresses {
+	// 	util.RpcCall(machine, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
+	// }
 }
 
 func (s *Server) OutputRecord(args *OutputRecordArgs, reply *struct{}) error {
-	fmt.Println(args.Record.String(PROCESSED, 0))
+	fmt.Print(args.Record.String(PROCESSED, 0))
+	return nil
+}
+
+func (s *Server) MarkPrevStageMachineDone(args *struct{}, reply *struct{}) error {
+	s.prevStageMachinesDone++
+
+	if s.prevStageMachinesDone == s.command.NumTasks {
+		// Forward to next stage
+		if s.command.Assignments.isOp1Machine(s.dhtServer.GetCurrentServerAddress()) {
+			for _, machine := range s.command.Assignments.Op2MachineAddresses {
+				util.RpcCall(machine, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
+			}
+		} else if s.command.Assignments.isOp2Machine(s.dhtServer.GetCurrentServerAddress()) {
+			util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
+		}
+
+		if s.outputBatchLogger != nil {
+			s.outputBatchLogger.Stop()
+			s.outputBatchLogger = nil
+		}
+
+		if s.operationsBatchLogger != nil {
+			s.operationsBatchLogger.Stop()
+			s.operationsBatchLogger = nil
+		}
+
+		if s.command.Assignments.LeaderMachineAddress == s.dhtServer.GetCurrentServerAddress() {
+			// Remove callback
+			s.dhtServer.Membership().OnRemoveMember(nil)
+			fmt.Println("Done")
+		}
+
+		// Reset internal state
+		s.command = nil
+		s.prevStageMachinesDone = 0
+		clear(s.processedRecordIDs)
+	}
+
 	return nil
 }
 
 func (s *Server) HandleFailedWorker(failedAddress string) {
-	// Check to see if failed machine is actually a worker
-	if _, ok := s.command.Assignments.AssignedMachines[failedAddress]; !ok {
-		log.Printf("Failed node:%s, not assigned a task", failedAddress)
+	if s.command == nil {
 		return
 	}
 
-	fmt.Println(failedAddress) // For testing purposes ~delete later~ TODO: Is address string formated correctly? - SATYAM SINGH
+	newAssignedTasks := make(map[string][]Task)
 
-	// Find which stage the address was working in
-	stageMap, stage := s.getStageMap(failedAddress)
-	if stageMap == nil {
-		log.Printf("Failed node: %s not found in any stage maps", failedAddress)
-		return
-	}
-
-	// Find a new worker for the task
-	newWorkerAddress := s.FindNewWorker(stageMap, failedAddress)
-	if newWorkerAddress == "" {
-		log.Printf("No suitable worker found for failed node: %s", failedAddress)
-		return
-	}
-
-	// Assign the new worker to the task by replacing all of the failed address with the new worker address
-	for key, value := range stageMap {
-		if value == failedAddress {
-			stageMap[key] = newWorkerAddress
+	// Check if failed machine was running any source tasks
+	for i, address := range s.command.Assignments.SourceMachineAddresses {
+		if address == failedAddress {
+			worker := s.findNewWorker()
+			s.command.Assignments.SourceMachineAddresses[i] = worker
+			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{SourceStage, i})
 		}
 	}
 
-	go s.AssignWorker(newWorkerAddress, stageMap, stage.String())
+	// Check if failed machine was running any op1 tasks
+	for i, address := range s.command.Assignments.Op1MachineAddresses {
+		if address == failedAddress {
+			worker := s.findNewWorker()
+			s.command.Assignments.Op1MachineAddresses[i] = worker
+			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{Op1Stage, i})
+		}
+	}
+
+	// Check if failed machine was running any op2 tasks
+	for i, address := range s.command.Assignments.Op2MachineAddresses {
+		if address == failedAddress {
+			worker := s.findNewWorker()
+			s.command.Assignments.Op2MachineAddresses[i] = worker
+			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{Op2Stage, i})
+		}
+	}
+
+	// Send new machine assignments to all workers
+	var wg sync.WaitGroup
+	for _, member := range s.dhtServer.Membership().Members() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args := &SetNewAssignmentsArgs{
+				s.command.Assignments,
+				newAssignedTasks[member.Address],
+			}
+			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetNewAssignments", args, struct{}{})
+			if err != nil {
+				fmt.Println(err)
+			}
+		}()
+	}
+
+	wg.Wait()
 }
 
-func (s *Server) FindNewWorker(workerAddresses map[int]string, failedAddress string) string {
-	// Check if there is a machine with no work
-	for _, member := range s.dhtServer.Membership().Members() {
-		if _, ok := s.command.Assignments.AssignedMachines[member.Address]; !ok {
-			return member.Address
-		}
+func (s *Server) findNewWorker() string {
+	taskCount := make(map[string]int)
+
+	for _, address := range s.command.Assignments.SourceMachineAddresses {
+		taskCount[address]++
 	}
 
-	// Pick the machine in the same stage with the "least work"
-	addressCount := make(map[string]int)
-	for _, address := range workerAddresses {
-		addressCount[address]++
+	type Machine struct {
+		taskCount int
+		address   string
 	}
 
-	var minCount int
-	var minAddress string
-	for address, count := range addressCount {
-		if minCount == 0 || count < minCount {
-			minCount = count
-			minAddress = address
-		}
+	addressToTaskCount := make([]Machine, 0)
+
+	for address, taskCount := range taskCount {
+		addressToTaskCount = append(addressToTaskCount, Machine{taskCount, address})
 	}
 
-	return minAddress
+	sort.Slice(addressToTaskCount, func(i, j int) bool {
+		return addressToTaskCount[i].taskCount < addressToTaskCount[j].taskCount
+	})
+
+	return addressToTaskCount[0].address
 }
 
 func (s *Server) AssignWorker(address string, stageMap map[int]string, workerStage string) {
-	// Parse log file and find all work that still needs to be done from the old failed machine
-	localFileName := "oldLogs.txt"
-	s.dhtServer.Get(s.command.HydfsSrcFile, localFileName)
-
-	indexes := s.GetTaskIndexesFromAddress(stageMap, address)
-
-	file, err := os.Open(localFileName)
-	if err != nil {
-		fmt.Printf("Error opening file: %v\n", err)
-		return
-	}
-	defer file.Close()
-
-	// Parse file
-	scanner := bufio.NewScanner(file)
-
-	pattern := `(\S+):(\S+):(\S+)<(\S+),(\S+)>`
-	re := regexp.MustCompile(pattern)
-
-	// Keep track of each status
-	received := make(map[string]Record)
-	outputted := make(map[string]Record)
-	acked := make(map[string]Record)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		matches := re.FindStringSubmatch(line)
-
-		if len(matches) > 0 {
-			// Extract values from the string
-			ID := matches[1]     // ID
-			status := matches[2] // status
-			stage := matches[3]  // stage
-			key := matches[4]    // Key
-			value := matches[5]  // Value
-
-			// Determine if tuple belongs to this machine | Check correct stage and correct index
-			if workerStage == stage && slices.Contains(indexes, util.Hash(key)%len(stageMap)) {
-				switch status {
-				case "RECEIVED":
-					received[ID] = Record{ID, key, value}
-				case "OUTPUTTED":
-					// Delete from receieved
-					delete(received, ID)
-
-					// Add to outputted
-					outputted[ID] = Record{ID, key, value}
-				case "ACKED":
-					// Delete from outputted
-					delete(outputted, ID)
-
-					// Add to acked
-					acked[ID] = Record{ID, key, value}
-
-				default:
-					fmt.Println("Invalid state")
-				}
-			}
-
-		}
-	}
-
-	// Process all received but not outputted
-
-	// Process all outputted but not acked
 
 }

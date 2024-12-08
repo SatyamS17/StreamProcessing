@@ -251,45 +251,40 @@ func (s *Server) RunHTTPServer() {
 }
 
 // Create a file called `dfsFileName` with the contents from `localFileName`.
-func (s *Server) Create(localFileName string, dfsFileName string) {
+func (s *Server) Create(localFileName string, dfsFileName string) error {
 	_, chunks := s.getBestReplica(dfsFileName)
 
 	if chunks == -1 {
-		fmt.Printf("Unable to create %s\n", dfsFileName)
-		return
+		return fmt.Errorf("unable to create %s", dfsFileName)
 	}
 
 	if chunks > 0 {
-		fmt.Printf("File %s already exists\n", dfsFileName)
-		return
+		return fmt.Errorf("file %s already exists", dfsFileName)
 	}
 
-	s.add(localFileName, dfsFileName)
+	return s.add(localFileName, dfsFileName)
 }
 
 // Append to the file called `dfsFileName` with the contents from `localFileName`.
-func (s *Server) Append(localFileName string, dfsFileName string) {
+func (s *Server) Append(localFileName string, dfsFileName string) error {
 	_, chunks := s.getBestReplica(dfsFileName)
 
 	if chunks == -1 {
-		fmt.Printf("Unable to append %s\n", dfsFileName)
-		return
+		return fmt.Errorf("unable to append %s", dfsFileName)
 	}
 
 	if chunks == 0 {
-		fmt.Printf("File %s doesn't exist\n", dfsFileName)
-		return
+		return fmt.Errorf("file %s doesn't exist", dfsFileName)
 	}
 
-	s.add(localFileName, dfsFileName)
+	return s.add(localFileName, dfsFileName)
 }
 
-func (s *Server) add(localFileName string, dfsFileName string) {
+func (s *Server) add(localFileName string, dfsFileName string) error {
 	// Check if local file is valid
 	_, err := os.Stat(localFileName)
 	if err != nil {
-		fmt.Printf("Local file (%s) not valid\n", localFileName)
-		return
+		return fmt.Errorf("local file (%s) not valid", localFileName)
 	}
 
 	hashValue, err := util.HashFile(localFileName, sha256.New)
@@ -301,8 +296,7 @@ func (s *Server) add(localFileName string, dfsFileName string) {
 	//defer os.Remove(tempFilePath)
 
 	if err := util.CopyFile(localFileName, tempFilePath); err != nil {
-		fmt.Println("Unable to copy local file.", err)
-		return
+		return fmt.Errorf("unable to copy local file.", err)
 	}
 
 	log.Printf("Copied %s to %s\n", localFileName, tempFilePath)
@@ -362,12 +356,12 @@ func (s *Server) add(localFileName string, dfsFileName string) {
 		if successes >= int(math.Ceil(float64(replicasCount)/2)) {
 			break
 		} else if responses == replicasCount {
-			fmt.Printf("Unable to add (received %d successful responses)\n", successes)
-			return
+			return fmt.Errorf("unable to add (received %d successful responses)", successes)
 		}
 	}
 
 	fmt.Printf("Successfully created/appended %s\n", dfsFileName)
+	return nil
 }
 
 // Get the file called `dfsFileName` and save it to `localFileName`.

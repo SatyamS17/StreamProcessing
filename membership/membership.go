@@ -222,7 +222,7 @@ func (s *Server) RunPeriodicPings() {
 					s.updates.push(MemberUpdate{UPDATE_SUSPECT, target, targetMemberData.Incarnation, time.Now()}, s.useSus)
 
 					go func() {
-						time.Sleep(protocolPeriod * 2)
+						time.Sleep(protocolPeriod * 4)
 						if targetMemberData.Status == MEMBER_SUSPECT {
 							log.Printf("Didn't receive an ALIVE for %s. Marking as failed\n", target.Address)
 							// Remove member from membership list
@@ -363,8 +363,12 @@ func (s *Server) removeMember(target Member) {
 
 	// Remove from membership list.
 	delete(s.membershipList, target)
-	s.onRemoveMember(target.Address)
-	s.onRemoveWorker(target.Address)
+	if s.onRemoveMember != nil {
+		s.onRemoveMember(target.Address)
+	}
+	if s.onRemoveWorker != nil {
+		s.onRemoveWorker(target.Address)
+	}
 
 	// Remove from shuffled list of servers to ping if present.
 	s.serversToPing = slices.DeleteFunc(s.serversToPing, func(m Member) bool {
@@ -379,7 +383,9 @@ func (s *Server) addMember(target Member) {
 	// Add to membership list.
 	s.membershipList[target] = &MemberData{MEMBER_CONNECTED, 0, make(chan struct{}, 10)}
 	if s.receivedJoinAck {
-		s.onAddMember(target.Address)
+		if s.onAddMember != nil {
+			s.onAddMember(target.Address)
+		}
 	}
 
 	// Add to shuffled list of servers to ping at random position.

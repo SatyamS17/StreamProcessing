@@ -1,23 +1,43 @@
 package rainstorm
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 type Command struct {
+	ID string
+
 	Op1Exe        string
 	Op2Exe        string
 	HydfsSrcFile  string
 	HydfsDestFile string
+	NumTasks      int
 
 	Assignments MachineAssignments
 }
 
 type MachineAssignments struct {
 	LeaderMachineAddress   string
-	SourceMachineAddresses map[int]string
-	Op1MachineAddresses    map[int]string
-	Op2MachineAddresses    map[int]string
+	SourceMachineAddresses []string
+	Op1MachineAddresses    []string
+	Op2MachineAddresses    []string
+}
 
-	AssignedMachines map[string]struct{}
+func (m *MachineAssignments) isSourceMachine(address string) bool {
+	return slices.Contains(m.SourceMachineAddresses, address)
+}
+
+func (m *MachineAssignments) isOp1Machine(address string) bool {
+	return slices.Contains(m.Op1MachineAddresses, address)
+}
+
+func (m *MachineAssignments) isOp2Machine(address string) bool {
+	return slices.Contains(m.Op2MachineAddresses, address)
+}
+
+func (m *MachineAssignments) isAssigned(address string) bool {
+	return m.isSourceMachine(address) || m.isOp1Machine(address) || m.isOp2Machine(address)
 }
 
 type Stage int
@@ -27,6 +47,11 @@ const (
 	Op1Stage
 	Op2Stage
 )
+
+type Task struct {
+	Stage Stage
+	Index int
+}
 
 type Record struct {
 	ID    string

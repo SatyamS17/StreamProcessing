@@ -137,14 +137,13 @@ func sendPacket(p interface{}, address string, port string, network string) erro
 	return nil
 }
 
-func RpcCall(address string, portNum string, function string, args any) error {
+func RpcCall(address string, portNum string, function string, args any, reply any) error {
 	client, err := rpc.DialHTTP("tcp", address+":"+portNum)
 	if err != nil {
 		return err
 	}
 
-	var reply struct{}
-	err = client.Call(function, args, &reply)
+	err = client.Call(function, args, reply)
 
 	// TODO retry if timeout
 	if err != nil {

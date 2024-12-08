@@ -109,7 +109,9 @@ func main() {
 				fmt.Println("Missing parameters")
 				continue
 			}
-			dhtServer.Create(text[1], text[2])
+			if err := dhtServer.Create(text[1], text[2]); err != nil {
+				fmt.Println(err)
+			}
 		case "get":
 			if len(text) < 3 {
 				fmt.Println("Missing parameters")
@@ -121,7 +123,9 @@ func main() {
 				fmt.Println("Missing parameters")
 				continue
 			}
-			dhtServer.Append(text[1], text[2])
+			if err := dhtServer.Append(text[1], text[2]); err != nil {
+				fmt.Println(err)
+			}
 		case "ls":
 			if len(text) < 2 {
 				util.Ls()
@@ -202,7 +206,7 @@ func main() {
 				continue
 			}
 
-			rainstorm.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks)
+			rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks)
 		default:
 			fmt.Printf("Invalid command\n")
 		}
