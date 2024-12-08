@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const flushPeriod = 1000 * time.Millisecond
+const flushPeriod = 100 * time.Millisecond
 
 type BatchLogger struct {
 	dhtServer     *dht.Server

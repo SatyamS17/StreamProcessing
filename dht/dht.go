@@ -296,7 +296,7 @@ func (s *Server) add(localFileName string, dfsFileName string) error {
 	//defer os.Remove(tempFilePath)
 
 	if err := util.CopyFile(localFileName, tempFilePath); err != nil {
-		return fmt.Errorf("unable to copy local file.", err)
+		return err
 	}
 
 	log.Printf("Copied %s to %s\n", localFileName, tempFilePath)
@@ -304,7 +304,7 @@ func (s *Server) add(localFileName string, dfsFileName string) error {
 	replicaAddresses := s.getReplicaAddresses(dfsFileName)
 	done := make(chan bool, replicasCount)
 	for _, replicaAddress := range replicaAddresses {
-		fmt.Printf("Replicating on %s\n", replicaAddress)
+		log.Printf("Replicating on %s\n", replicaAddress)
 		go func() {
 			if s.membershipServer.CurrentServer().Address == replicaAddress {
 				s.lock.Lock()
@@ -336,7 +336,7 @@ func (s *Server) add(localFileName string, dfsFileName string) error {
 				p := NewAddPacket(s.membershipServer.CurrentServer().Address, dfsFileName, hashValue)
 				err := s.sendPacketAndWaitAck(replicaAddress, *p)
 				if err != nil {
-					fmt.Println(err)
+					log.Println(err)
 					done <- false
 				} else {
 					done <- true
@@ -360,7 +360,7 @@ func (s *Server) add(localFileName string, dfsFileName string) error {
 		}
 	}
 
-	fmt.Printf("Successfully created/appended %s\n", dfsFileName)
+	log.Printf("Successfully created/appended %s\n", dfsFileName)
 	return nil
 }
 
@@ -462,7 +462,7 @@ func (s *Server) handleRemoveMember(removedMember string) {
 
 	// Populates s.neighborStoredFiles
 	if err := s.sendPacketAndWaitAck(predAddress, *p); err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
@@ -667,7 +667,7 @@ func (s *Server) downloadFromReplica(replicaAddress string, dfsFileName string, 
 
 	os.Remove(tmpFileName)
 
-	fmt.Printf("Successfully saved to %s\n", localFileName)
+	log.Printf("Successfully saved to %s\n", localFileName)
 }
 
 func (s *Server) Store() {
@@ -777,7 +777,6 @@ func (s *Server) Multiappend(dfsFileName string, vmIds []int, localFiles []strin
 			if currentServerAdress == requestAddress {
 				s.Append(localFiles[i], dfsFileName)
 				log.Printf("Finished appending to %s\n", dfsFileName)
-				fmt.Printf("%s appended successfully\n", currentServerAdress)
 			} else {
 				s.requestAcks[requestAddress] = make(chan struct{}, 1)
 
@@ -793,10 +792,8 @@ func (s *Server) Multiappend(dfsFileName string, vmIds []int, localFiles []strin
 				select {
 				case <-s.requestAcks[requestAddress]:
 					log.Printf("Received ACK from %s\n", requestAddress)
-					fmt.Printf("%s appended successfully\n", requestAddress)
 				case <-time.After(ackTimeout):
 					log.Printf("Timed out waiting for ACK from %s\n", requestAddress)
-					fmt.Printf("%s failed to append\n", requestAddress)
 				}
 
 				delete(s.requestAcks, requestAddress)

@@ -38,10 +38,12 @@ type Server struct {
 	operationsBatchLogger *BatchLogger
 
 	prevStageMachinesDone int
+
+	mu sync.Mutex
 }
 
 func NewServer(dhtServer *dht.Server) *Server {
-	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil, nil, 0}
+	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil, nil, 0, sync.Mutex{}}
 	return &s
 }
 
@@ -116,12 +118,16 @@ type SetCommandArgs struct {
 }
 
 func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
+	s.mu.Lock()
+
 	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt")
 	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
 		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile)
 	}
 
 	s.command = &args.Command
+
+	s.mu.Unlock()
 
 	if s.command.Assignments.isSourceMachine(s.currentServerAddress) {
 		go s.Source()
@@ -130,15 +136,23 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 }
 
 type SetNewAssignmentsArgs struct {
-	NewAssignemnts MachineAssignments
+	NewAssignments MachineAssignments
 
 	NewAssignedTasks []Task
 }
 
 func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{}) error {
-	s.command.Assignments = args.NewAssignemnts
+	s.mu.Lock()
+
+	s.command.Assignments = args.NewAssignments
+
+	fmt.Println("New tasks", args.NewAssignedTasks)
 
 	// Check if we were assigned any new tasks. If so, we have to parse through the ops log
+	if len(args.NewAssignedTasks) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
 
 	// Parse log file and find all work that still needs to be done from the old failed machine
 	localFileName := "oldLogs.txt"
@@ -147,6 +161,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	file, err := os.Open(localFileName)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
+		s.mu.Unlock()
 		return nil
 	}
 	defer file.Close()
@@ -154,7 +169,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	// Parse file
 	scanner := bufio.NewScanner(file)
 
-	pattern := `(\S+):(\S+):(\S+)<(\S+),(\S+)>`
+	pattern := `([\w-]+):([\w-]+):([\w-]+)<([\w.-]+:\d+),\s*(\w+)>`
 	re := regexp.MustCompile(pattern)
 
 	// Keep track of each status
@@ -178,12 +193,15 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 					switch status {
 					case "RECEIVED":
 						s.processedRecordIDs[ID] = struct{}{}
+						fmt.Printf("Adding %s to processed\n", ID)
 					case "OUTPUTTED":
 						// Add to outputted
 						outputted[Record{ID, key, value}] = stage
+						fmt.Printf("Adding %s to be outputted", ID)
 					case "ACKED":
 						// Delete from outputted
 						delete(outputted, Record{ID, key, value})
+						fmt.Printf("Removing %s to be outputted", ID)
 					default:
 						fmt.Println("Invalid state")
 					}
@@ -198,16 +216,24 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 		case "SOURCE":
 			fmt.Println("oops")
 		case "OP1":
-			nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
-			args := ProcessRecordArgs{Op1Stage, record}
-			err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &struct{}{})
-			if err != nil {
-				fmt.Println(err)
+			fmt.Println("Resending to OP2")
+			for {
+				nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
+				args := ProcessRecordArgs{Op1Stage, record}
+				var ok bool
+				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
+				if err != nil || !ok {
+					fmt.Println(err)
+					time.Sleep(500 * time.Millisecond)
+				} else {
+					break
+				}
 			}
 
 			// Log ACK to DFS
 			s.operationsBatchLogger.Append(record.String(ACKED, Op1Stage))
 		case "OP2":
+			fmt.Println("Resending to leader")
 			// Send record to leader
 			args := OutputRecordArgs{record}
 			err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
@@ -223,6 +249,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 		}
 	}
 
+	s.mu.Unlock()
 	return nil
 }
 
@@ -283,11 +310,13 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 					nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
 					args := ProcessRecordArgs{currentStage, record}
 					var ok bool
+					fmt.Printf("Sending key %s to op2\n", record.Key)
 					err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
 					if err != nil || !ok {
 						fmt.Println(err)
 						time.Sleep(500 * time.Millisecond)
 					} else {
+						fmt.Printf("Sent key %s\n", record.Key)
 						break
 					}
 				}
@@ -302,6 +331,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 				// Send record to leader
 				args := OutputRecordArgs{record}
+				fmt.Printf("Sending key %s to leader\n", record.Key)
 				err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
 				if err != nil {
 					fmt.Println(err)
@@ -311,7 +341,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 				s.outputBatchLogger.Append(record.String(PROCESSED, 0))
 
 				// Log ACK to DFS
-				// s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
+				s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
 			}
 		}
 	}()
@@ -355,6 +385,7 @@ func (s *Server) Source() {
 				nextStageServerAddress := s.command.Assignments.Op1MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
 				args := ProcessRecordArgs{SourceStage, record}
 				var ok bool
+				fmt.Printf("Sending key %s to op1\n", record.Key)
 				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
 
 				if err != nil || !ok {
@@ -464,7 +495,7 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 				s.command.Assignments,
 				newAssignedTasks[member.Address],
 			}
-			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetNewAssignments", args, struct{}{})
+			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetNewAssignments", args, &struct{}{})
 			if err != nil {
 				fmt.Println(err)
 			}

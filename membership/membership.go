@@ -201,6 +201,11 @@ func (s *Server) RunPeriodicPings() {
 
 		targetMemberData := s.membershipList[target]
 
+		if targetMemberData == nil {
+			<-nextPeriod
+			continue
+		}
+
 		// Await an ack response with a timeout.
 		select {
 		case <-targetMemberData.Ack:
