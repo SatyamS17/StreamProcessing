@@ -152,14 +152,14 @@ func (s *Server) HandlePacket(p Packet) {
 
 		s.lock.Unlock()
 
-		ackP := NewAddAckPacket(s.membershipServer.CurrentServer().Address)
+		ackP := NewAddAckPacket(s.membershipServer.CurrentServer().Address, p.ID)
 		if err := util.SendTCPPacket(ackP, p.Source, portNumber); err != nil {
 			log.Println("Unable to send ACK")
 			return
 		}
 
 	case PACKET_ADD_ACK:
-		m, ok := s.acks[p.Source]
+		m, ok := s.acks[p.ID]
 		if !ok {
 			return
 		}
@@ -169,21 +169,21 @@ func (s *Server) HandlePacket(p Packet) {
 	case PACKET_GET:
 		log.Println("Responding to get")
 		chunks := s.files[p.FileName]
-		ackP := NewGetAckPacket(s.membershipServer.CurrentServer().Address, chunks)
+		ackP := NewGetAckPacket(s.membershipServer.CurrentServer().Address, chunks, p.ID)
 		if err := util.SendTCPPacket(ackP, p.Source, portNumber); err != nil {
 			log.Println("Unable to send ACK")
 			return
 		}
 		log.Println("Done responding")
 	case PACKET_GET_ACK:
-		m, ok := s.acks[p.Source]
+		m, ok := s.acks[p.ID]
 		if !ok {
 			return
 		}
 
 		log.Printf("Received ACK from %s\n", p.Source)
 
-		s.getChunkCounts[p.Source] = p.ChunkCount
+		s.getChunkCounts[p.ID] = p.ChunkCount
 		m <- struct{}{}
 	case REQUEST_APPEND:
 		s.Append(p.LocalFileName, p.FileName)
@@ -218,13 +218,13 @@ func (s *Server) HandlePacket(p Packet) {
 			return
 		}
 	case PACKET_STORE:
-		ackP := NewStoreAckPacket(s.membershipServer.CurrentServer().Address, slices.Collect(maps.Keys(s.files)))
+		ackP := NewStoreAckPacket(s.membershipServer.CurrentServer().Address, slices.Collect(maps.Keys(s.files)), p.ID)
 		if err := util.SendTCPPacket(ackP, p.Source, portNumber); err != nil {
 			log.Println("Unable to send ACK")
 			return
 		}
 	case PACKET_STORE_ACK:
-		m, ok := s.acks[p.Source]
+		m, ok := s.acks[p.ID]
 		if !ok {
 			return
 		}
@@ -568,10 +568,12 @@ func (s *Server) Ls(dfsFileName string) {
 func (s *Server) getBestReplica(dfsFileName string) (string, int) {
 	replicaAddresses := s.getReplicaAddresses(dfsFileName)
 	done := make(chan bool, replicasCount)
-	clear(s.getChunkCounts)
+	chunkCounts := make(map[string]int)
+
 	for _, replicaAddress := range replicaAddresses {
 		go func() {
 			chunks := s.getChunkCount(replicaAddress, dfsFileName)
+			chunkCounts[replicaAddress] = chunks
 			done <- chunks != -1
 		}()
 	}
@@ -594,7 +596,7 @@ func (s *Server) getBestReplica(dfsFileName string) (string, int) {
 
 	maxChunks := 0
 	var replicaAddress string
-	for a, chunks := range s.getChunkCounts {
+	for a, chunks := range chunkCounts {
 		if chunks > maxChunks {
 			maxChunks = chunks
 			replicaAddress = a
@@ -607,8 +609,6 @@ func (s *Server) getBestReplica(dfsFileName string) (string, int) {
 // For a file called `dfsFileName`, get the number of chunks stored on `replicaAddress` server
 // (0 indiciates file not found on server, -1 indicates an error communicating with the server).
 func (s *Server) getChunkCount(replicaAddress string, dfsFileName string) int {
-	delete(s.getChunkCounts, replicaAddress)
-
 	p := NewGetPacket(s.membershipServer.CurrentServer().Address, dfsFileName)
 
 	if err := s.sendPacketAndWaitAck(replicaAddress, *p); err != nil {
@@ -616,7 +616,9 @@ func (s *Server) getChunkCount(replicaAddress string, dfsFileName string) int {
 		return -1
 	}
 
-	return s.getChunkCounts[replicaAddress]
+	chunks := s.getChunkCounts[p.ID]
+	delete(s.getChunkCounts, p.ID)
+	return chunks
 }
 
 // Download a given number of chunks of the file `dfsFileName` from `replicaAddress` and save to `localFileName`.
@@ -750,8 +752,8 @@ func (s *Server) sortedServerIDs() []int {
 }
 
 func (s *Server) sendPacketAndWaitAck(target string, p Packet) error {
-	s.acks[target] = make(chan struct{}, 1)
-	defer delete(s.acks, target)
+	s.acks[p.ID] = make(chan struct{}, 1)
+	defer delete(s.acks, p.ID)
 
 	if err := util.SendTCPPacket(p, target, portNumber); err != nil {
 		return fmt.Errorf("unable to send packet to %s", target)
@@ -760,7 +762,7 @@ func (s *Server) sendPacketAndWaitAck(target string, p Packet) error {
 	log.Printf("Sent packet to %s\n", target)
 
 	select {
-	case <-s.acks[target]:
+	case <-s.acks[p.ID]:
 		log.Printf("Received ACK from %s\n", target)
 		return nil
 	case <-time.After(ackTimeout):

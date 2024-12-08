@@ -2,6 +2,8 @@ package dht
 
 import (
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 type PacketType int
@@ -34,44 +36,90 @@ type Packet struct {
 	ChunkCount    int    // Number of chunks that exist for a file for GET_ACK packets
 
 	StoredFileNames string
+	ID              string
 }
 
 func NewAddPacket(source string, fileName string, hash string) *Packet {
-	return &Packet{PACKET_ADD, source, fileName, hash, "", 0, ""}
+	return &Packet{
+		T:        PACKET_ADD,
+		Source:   source,
+		FileName: fileName,
+		Hash:     hash,
+		ID:       uuid.NewString(),
+	}
 }
 
-func NewAddAckPacket(source string) *Packet {
-	return &Packet{PACKET_ADD_ACK, source, "", "", "", 0, ""}
+func NewAddAckPacket(source string, id string) *Packet {
+	return &Packet{
+		T:      PACKET_ADD_ACK,
+		Source: source,
+		ID:     id,
+	}
 }
 
 func NewGetPacket(source string, fileName string) *Packet {
-	return &Packet{PACKET_GET, source, fileName, "", "", 0, ""}
+	return &Packet{
+		T:        PACKET_GET,
+		Source:   source,
+		FileName: fileName,
+		ID:       uuid.NewString(),
+	}
 }
 
-func NewGetAckPacket(source string, chunkCount int) *Packet {
-	return &Packet{PACKET_GET_ACK, source, "", "", "", chunkCount, ""}
+func NewGetAckPacket(source string, chunkCount int, id string) *Packet {
+	return &Packet{
+		T:          PACKET_GET_ACK,
+		Source:     source,
+		ChunkCount: chunkCount,
+		ID:         id,
+	}
 }
 
 func NewStorePacket(source string) *Packet {
-	return &Packet{PACKET_STORE, source, "", "", "", 0, ""}
+	return &Packet{
+		T:      PACKET_STORE,
+		Source: source,
+		ID:     uuid.NewString(),
+	}
 }
 
-func NewStoreAckPacket(source string, fileNames []string) *Packet {
-	return &Packet{PACKET_STORE_ACK, source, "", "", "", 0, strings.Join(fileNames, ",")}
+func NewStoreAckPacket(source string, fileNames []string, id string) *Packet {
+	return &Packet{
+		T:               PACKET_STORE_ACK,
+		Source:          source,
+		StoredFileNames: strings.Join(fileNames, ","),
+		ID:              id,
+	}
 }
 
 func NewMergePacket(source string, fileName string) *Packet {
-	return &Packet{PACKET_MERGE, source, fileName, "", "", 0, ""}
+	return &Packet{
+		T:        PACKET_MERGE,
+		Source:   source,
+		FileName: fileName,
+	}
 }
 
 func NewRequestAppendPacket(source string, dfsfileName string, localfilename string) *Packet {
-	return &Packet{REQUEST_APPEND, source, dfsfileName, "", localfilename, 0, ""}
+	return &Packet{
+		T:             REQUEST_APPEND,
+		Source:        source,
+		FileName:      dfsfileName,
+		LocalFileName: localfilename,
+	}
 }
 
 func NewRequestMergePacket(source string, dfsfileName string) *Packet {
-	return &Packet{REQUEST_MERGE, source, dfsfileName, "", "", 0, ""}
+	return &Packet{
+		T:        REQUEST_MERGE,
+		Source:   source,
+		FileName: dfsfileName,
+	}
 }
 
 func NewRequestAckPacket(source string) *Packet {
-	return &Packet{REQUEST_ACK, source, "", "", "", 0, ""}
+	return &Packet{
+		T:      REQUEST_ACK,
+		Source: source,
+	}
 }
