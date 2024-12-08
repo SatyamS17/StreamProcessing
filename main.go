@@ -206,7 +206,12 @@ func main() {
 				continue
 			}
 
-			rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks)
+			if len(text) > 6 { // Have a pattern
+				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, text[6])
+			} else { // No pattern
+				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, "")
+			}
+
 		default:
 			fmt.Printf("Invalid command\n")
 		}

@@ -58,7 +58,7 @@ func (s *Server) RunRPCServer() {
 	http.Serve(l, nil)
 }
 
-func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int) {
+func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int, pattern string) {
 	machineAssignments := MachineAssignments{
 		membershipServer.CurrentServer().Address,
 		make([]string, numTasks),
@@ -88,6 +88,7 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 		hydfsSrcFile,
 		hydfsDestFile,
 		numTasks,
+		pattern,
 		machineAssignments,
 	}
 
@@ -171,10 +172,10 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	scanner := bufio.NewScanner(file)
 
 	pattern := `([\w-]+):([\w-]+):([\w-]+)<([\w.-]+:\d+),\s*(\w+)>`
-	state_pattern := `^([^:]+):(.*)\+1$`
+	// state_pattern := `^([^:]+):(.*)\+1$`
 
 	re := regexp.MustCompile(pattern)
-	state_re := regexp.MustCompile(state_pattern)
+	// state_re := regexp.MustCompile(state_pattern)
 
 	// Keep track of each status
 	outputted := make(map[Record]string)
@@ -182,7 +183,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	for scanner.Scan() {
 		line := scanner.Text()
 		matches := re.FindStringSubmatch(line)
-		state_matches := state_re.FindStringSubmatch(line)
+		// state_matches := state_re.FindStringSubmatch(line)
 
 		if len(matches) > 0 {
 			// Extract values from the string
@@ -215,21 +216,21 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 
 		}
 
-		if len(state_matches) > 0 {
-			count := make(map[string]int)
-			stage := state_matches[1] // ID
-			key := state_matches[2]   // status
+		// if len(state_matches) > 0 {
+		// 	count := make(map[string]int)
+		// 	stage := state_matches[1] // ID
+		// 	key := state_matches[2]   // status
 
-			// Determine if tuple belongs to this machine | Check correct stage and correct index
-			for _, task := range args.NewAssignedTasks {
-				if task.Stage.String() == stage && util.Hash(key)%s.command.NumTasks == task.Index {
-					count[key]++
-				}
-			}
+		// 	// Determine if tuple belongs to this machine | Check correct stage and correct index
+		// 	for _, task := range args.NewAssignedTasks {
+		// 		if task.Stage.String() == stage && util.Hash(key)%s.command.NumTasks == task.Index {
+		// 			count[key]++
+		// 		}
+		// 	}
 
-			fmt.Println("TESTING")
-			fmt.Print(count)
-		}
+		// 	fmt.Println("TESTING")
+		// 	fmt.Print(count)
+		// }
 	}
 
 	for record, stage := range outputted {
@@ -308,9 +309,9 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		opCmd = s.command.Op2Exe
 	}
 
-	s.operationsBatchLogger.mu.Lock()
-	out, err := exec.Command("./"+opCmd, args.Record.Key, args.Record.Value, currentStage.String(), s.command.ID+"_ops.txt.tmp").Output()
-	s.operationsBatchLogger.mu.Unlock()
+	// s.operationsBatchLogger.mu.Lock()
+	out, err := exec.Command("./"+opCmd, args.Record.Key, args.Record.Value, currentStage.String(), s.command.ID+"_ops.txt.tmp", s.command.Pattern).Output()
+	// s.operationsBatchLogger.mu.Unlock()
 
 	if err != nil {
 		fmt.Println(err)
@@ -319,6 +320,13 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	}
 
 	outSplit := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	// Could return nothing
+	if len(outSplit) < 2 {
+		*reply = true
+		return nil
+	}
+
 	records := make([]Record, len(outSplit)/2)
 	for i := 0; i < len(outSplit); i += 2 {
 		records[i/2] = Record{uuid.NewString(), outSplit[i], outSplit[i+1]}

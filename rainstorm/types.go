@@ -13,8 +13,8 @@ type Command struct {
 	HydfsSrcFile  string
 	HydfsDestFile string
 	NumTasks      int
-
-	Assignments MachineAssignments
+	Pattern       string
+	Assignments   MachineAssignments
 }
 
 type MachineAssignments struct {
