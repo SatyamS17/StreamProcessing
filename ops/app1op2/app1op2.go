@@ -1,15 +1,18 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"os"
 	"strings"
 )
 
 func main() {
-	// key := os.Args[1]
-	values := strings.Split(os.Args[2], ",")
-	// pattern := os.Args[3]
+	r := csv.NewReader(strings.NewReader(os.Args[2]))
+	values, err := r.Read()
+	if err != nil {
+		return
+	}
 
 	fmt.Println(values[2])
 	fmt.Println(values[3])
