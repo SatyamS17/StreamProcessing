@@ -16,6 +16,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 var (
@@ -143,13 +144,13 @@ func RpcCall(address string, portNum string, function string, args any, reply an
 		return err
 	}
 
-	err = client.Call(function, args, reply)
-
-	// TODO retry if timeout
-	if err != nil {
-		return err
+	call := client.Go(function, args, reply, nil)
+	select {
+	case call := <-call.Done:
+		return call.Error
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out")
 	}
-	return nil
 }
 
 func Cat(fileName string) {

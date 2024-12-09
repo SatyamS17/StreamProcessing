@@ -65,12 +65,12 @@ func (b *BatchLogger) Append(data string) {
 	// Make sure logger is valid
 	if b == nil {
 		fmt.Println("LOGGER IS NULL")
-		log.Fatal("Logger is null")
-		return
+		os.Exit(1)
 	}
 
 	if b.stopped {
-		log.Fatal("Appending to stopped logger")
+		fmt.Println("Appending to stopped logger")
+		os.Exit(1)
 	}
 
 	// Write to local file
@@ -103,6 +103,9 @@ func (b *BatchLogger) Stop() {
 
 // Copies all local file data to dfs file (clears local file)
 func (b *BatchLogger) flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	fi, err := os.Stat(b.localFileName)
 	if err != nil {
 		return
@@ -110,13 +113,11 @@ func (b *BatchLogger) flush() {
 
 	// Make sure we have something worth copying
 	if fi.Size() > 0 {
-		b.mu.Lock()
 		err := b.dhtServer.Append(b.localFileName, b.dfsFileName)
 		if err != nil {
 			fmt.Println(err)
 		} else {
 			os.Truncate(b.localFileName, 0)
 		}
-		b.mu.Unlock()
 	}
 }
