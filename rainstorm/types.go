@@ -72,7 +72,7 @@ type ProcessRecordArgs struct {
 
 func (r *Record) String(status RecordStatus, currentStage Stage) string {
 	if status != PROCESSED {
-		return fmt.Sprintf("%s:%s:%s<%s, %s>\n", r.ID, status, currentStage, r.Key, r.Value)
+		return fmt.Sprintf("%s⟁%s⟁%s⟁%s⟁%s\n", r.ID, status, currentStage, r.Key, r.Value)
 	} else {
 		return fmt.Sprintf("<%s, %s>\n", r.Key, r.Value)
 	}

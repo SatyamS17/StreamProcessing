@@ -3,7 +3,6 @@ package rainstorm
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"mp4/dht"
 	"mp4/membership"
 	"mp4/util"
@@ -12,7 +11,6 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -69,6 +67,7 @@ func (s *Server) resetState() {
 
 	s.command = nil
 	clear(s.processedRecordIDs)
+
 	if s.outputBatchLogger != nil {
 		s.outputBatchLogger.Stop()
 		s.outputBatchLogger = nil
@@ -77,6 +76,8 @@ func (s *Server) resetState() {
 		s.operationsBatchLogger.Stop()
 		s.operationsBatchLogger = nil
 	}
+
+	clear(s.state)
 }
 
 func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int, pattern string) {
@@ -170,6 +171,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	s.mu.Lock()
 
 	s.command.Assignments = args.NewAssignments
+	fmt.Println("new assignments", s.command.Assignments)
 
 	fmt.Println("New tasks", args.NewAssignedTasks)
 
@@ -202,27 +204,20 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	// Parse file
 	scanner := bufio.NewScanner(file)
 
-	pattern := `([\w-]+):([\w-]+):([\w-]+)<([\w.-]+:\d+),\s*(\w+)>`
-	state_pattern := `^([^:]+):(.*)\+1$`
-
-	re := regexp.MustCompile(pattern)
-	state_re := regexp.MustCompile(state_pattern)
-
 	// Keep track of each status
 	outputted := make(map[Record]string)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		matches := re.FindStringSubmatch(line)
-		state_matches := state_re.FindStringSubmatch(line)
+		matches := strings.Split(line, "⟁")
 
-		if len(matches) > 0 {
+		if len(matches) == 5 {
 			// Extract values from the string
-			ID := matches[1]     // ID
-			status := matches[2] // status
-			stage := matches[3]  // stage
-			key := matches[4]    // Key
-			value := matches[5]  // Value
+			ID := matches[0]     // ID
+			status := matches[1] // status
+			stage := matches[2]  // stage
+			key := matches[3]    // Key
+			value := matches[4]  // Value
 
 			// Determine if tuple belongs to this machine | Check correct stage and correct index
 			for _, task := range args.NewAssignedTasks {
@@ -230,15 +225,13 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 					switch status {
 					case "RECEIVED":
 						s.processedRecordIDs[ID] = struct{}{}
-						fmt.Printf("Adding %s to processed\n", ID)
+						fmt.Printf("Adding %s to processed map\n", ID)
 					case "OUTPUTTED":
 						// Add to outputted
 						outputted[Record{ID, key, value}] = stage
-						fmt.Printf("Adding %s to be outputted\n", ID)
 					case "ACKED":
 						// Delete from outputted
 						delete(outputted, Record{ID, key, value})
-						fmt.Printf("Removing %s to be outputted\n", ID)
 					default:
 						fmt.Println("Invalid state")
 					}
@@ -247,34 +240,29 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 
 		}
 
-		if len(state_matches) > 0 {
-			stage := state_matches[1] // ID
-			key := state_matches[2]   // status
+		if len(matches) == 1 {
+			key := matches[0]
 
 			// Determine if tuple belongs to this machine | Check correct stage and correct index
 			for _, task := range args.NewAssignedTasks {
-				fmt.Print(state_matches)
-				if task.Stage.String() == stage && util.Hash(key)%s.command.NumTasks == task.Index {
-					fmt.Println("RECOLLECTING")
-					s.state[key] = s.state[key] + 1
+				if util.Hash(key)%s.command.NumTasks == task.Index {
+					fmt.Printf("Updating state (+1 to %s)\n", key)
+					s.state[key] += 1
 				}
 			}
 
 		}
 	}
 
-	fmt.Print("CHECK OLD STATE:\n")
-	fmt.Print(s.state)
-
 	for record, stage := range outputted {
 		switch stage {
 		case "SOURCE":
 			fmt.Println("oops")
 		case "OP1":
-			fmt.Println("Resending to OP2")
+			fmt.Printf("Resending key %s to OP2\n", record.Key)
 			go s.SendRecord(ProcessRecordArgs{Op1Stage, record})
 		case "OP2":
-			fmt.Println("Resending to leader")
+			fmt.Printf("Resending key %s to to leader\n", record.Key)
 			go s.SendRecord(ProcessRecordArgs{Op2Stage, record})
 		}
 	}
@@ -289,6 +277,8 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		return nil
 	}
 
+	s.mu.Lock()
+
 	var currentStage Stage
 	if args.FromStage == SourceStage && s.command.Assignments.isOp1Machine(s.currentServerAddress) {
 		currentStage = Op1Stage
@@ -296,16 +286,20 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		currentStage = Op2Stage
 	} else if args.FromStage == Op2Stage && s.command.Assignments.LeaderMachineAddress == s.currentServerAddress {
 		fmt.Print(args.Record.String(PROCESSED, 0))
+
+		s.mu.Unlock()
 		*reply = true
 		return nil
 	} else {
+		s.mu.Unlock()
 		*reply = false
 		return nil
 	}
 
 	// Check if record is duplicate
 	if _, ok := s.processedRecordIDs[args.Record.ID]; ok {
-		log.Println("Duplicate record - not processing")
+		fmt.Printf("Duplicate record %s - not processing\n", args.Record.ID)
+		s.mu.Unlock()
 		*reply = true
 		return nil
 	}
@@ -321,7 +315,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		opCmd = s.command.Op2Exe
 	}
 
-	out, err := exec.Command("./"+opCmd, args.Record.Key, args.Record.Value, currentStage.String(), s.command.ID+"_ops.txt.tmp", s.command.Pattern).Output()
+	out, err := exec.Command("./"+opCmd, args.Record.Key, args.Record.Value, s.command.Pattern).Output()
 
 	if err != nil {
 		fmt.Println(err)
@@ -340,12 +334,16 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	var records []Record
 
 	if len(outSplit) == 1 {
+		if outSplit[0] == "" {
+			*reply = true
+			return nil
+		}
 		records = make([]Record, 1)
 
 		s.state[outSplit[0]] = s.state[outSplit[0]] + 1
 		records[0] = Record{uuid.NewString(), outSplit[0], strconv.Itoa(s.state[outSplit[0]])}
 
-		stateChange := fmt.Sprintf("%s:%s+1", args.Record.Key, args.Record.Key)
+		stateChange := fmt.Sprintf("%s\n", args.Record.Key)
 		s.operationsBatchLogger.Append(stateChange)
 	} else {
 		records = make([]Record, len(outSplit)/2)
@@ -359,6 +357,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		go s.SendRecord(ProcessRecordArgs{currentStage, record})
 	}
 
+	s.mu.Unlock()
 	*reply = true
 	return nil
 }
@@ -369,10 +368,10 @@ func (s *Server) SendRecord(args ProcessRecordArgs) {
 		switch args.FromStage {
 		case SourceStage:
 			nextStageServerAddress = s.command.Assignments.Op1MachineAddresses[util.Hash(args.Record.Key)%s.command.NumTasks]
-			fmt.Printf("Sending key %s to op1\n", args.Record.Key)
+			fmt.Printf("Sending key %s to op1 (%s)\n", args.Record.Key, nextStageServerAddress)
 		case Op1Stage:
 			nextStageServerAddress = s.command.Assignments.Op2MachineAddresses[util.Hash(args.Record.Key)%s.command.NumTasks]
-			fmt.Printf("Sending key %s to op2\n", args.Record.Key)
+			fmt.Printf("Sending key %s to op2 (%s)\n", args.Record.Key, nextStageServerAddress)
 		case Op2Stage:
 			nextStageServerAddress = s.command.Assignments.LeaderMachineAddress
 			fmt.Printf("Sending key %s to leader\n", args.Record.Key)
@@ -384,7 +383,7 @@ func (s *Server) SendRecord(args ProcessRecordArgs) {
 
 		if err != nil || !ok {
 			fmt.Println(err)
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(2 * time.Second)
 		} else {
 			break
 		}
@@ -448,7 +447,7 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 	// Check if failed machine was running any source tasks
 	for i, address := range s.command.Assignments.SourceMachineAddresses {
 		if address == failedAddress {
-			worker := s.findNewWorker()
+			worker := s.findNewWorker(failedAddress)
 			s.command.Assignments.SourceMachineAddresses[i] = worker
 			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{SourceStage, i})
 		}
@@ -457,7 +456,7 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 	// Check if failed machine was running any op1 tasks
 	for i, address := range s.command.Assignments.Op1MachineAddresses {
 		if address == failedAddress {
-			worker := s.findNewWorker()
+			worker := s.findNewWorker(failedAddress)
 			s.command.Assignments.Op1MachineAddresses[i] = worker
 			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{Op1Stage, i})
 		}
@@ -466,7 +465,7 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 	// Check if failed machine was running any op2 tasks
 	for i, address := range s.command.Assignments.Op2MachineAddresses {
 		if address == failedAddress {
-			worker := s.findNewWorker()
+			worker := s.findNewWorker(failedAddress)
 			s.command.Assignments.Op2MachineAddresses[i] = worker
 			newAssignedTasks[worker] = append(newAssignedTasks[worker], Task{Op2Stage, i})
 		}
@@ -492,12 +491,20 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 	wg.Wait()
 }
 
-func (s *Server) findNewWorker() string {
+func (s *Server) findNewWorker(failedAddress string) string {
 	taskCount := make(map[string]int)
 
 	for _, address := range s.command.Assignments.SourceMachineAddresses {
 		taskCount[address]++
 	}
+	for _, address := range s.command.Assignments.Op1MachineAddresses {
+		taskCount[address]++
+	}
+	for _, address := range s.command.Assignments.Op2MachineAddresses {
+		taskCount[address]++
+	}
+
+	delete(taskCount, failedAddress)
 
 	type Machine struct {
 		taskCount int
