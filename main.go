@@ -9,6 +9,7 @@ import (
 	"mp4/rainstorm"
 	"mp4/util"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,14 @@ import (
 
 func main() {
 	fmt.Println("whelfaj") // DO NOT DELETE
+
+	files, err := filepath.Glob("*.tmp")
+	if err != nil {
+		panic(err)
+	}
+	for _, f := range files {
+		os.Remove(f)
+	}
 
 	// Get current server address.
 	hostname, err := os.Hostname()
