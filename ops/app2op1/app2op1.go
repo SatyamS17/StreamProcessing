@@ -1,13 +1,18 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"os"
 	"strings"
 )
 
 func main() {
-	values := strings.Split(os.Args[2], ",")
+	r := csv.NewReader(strings.NewReader(os.Args[2]))
+	values, err := r.Read()
+	if err != nil {
+		return
+	}
 	pattern := os.Args[3]
 
 	if values[6] == pattern {
