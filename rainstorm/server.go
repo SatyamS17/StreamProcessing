@@ -127,6 +127,8 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 	// Register callback
 	s.dhtServer.Membership().OnRemoveWorker(s.HandleFailedWorker)
 
+	s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile, 500*time.Millisecond)
+
 	// Assign tasks to all workers
 	var wg sync.WaitGroup
 	for _, member := range members {
@@ -164,9 +166,6 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 
 	// Init all loggers
 	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt", 0)
-	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
-		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile, 0)
-	}
 
 	s.command = &args.Command
 
@@ -195,14 +194,6 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	// Check if we were assigned any new tasks. If so, we have to parse through the ops log
 	if len(args.NewAssignedTasks) == 0 {
 		return nil
-	}
-
-	// If we weren't op2 before but now we are, init the output batch logger
-	for _, task := range args.NewAssignedTasks {
-		if task.Stage == Op2Stage && s.outputBatchLogger == nil {
-			s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile, 0)
-			break
-		}
 	}
 
 	// Parse log file and find all work that still needs to be done from the old failed machine
@@ -297,22 +288,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Get the current stage
-	var currentStage Stage
-	if args.FromStage == SourceStage && s.command.Assignments.isOp1Machine(s.currentServerAddress) {
-		currentStage = Op1Stage
-	} else if args.FromStage == Op1Stage && s.command.Assignments.isOp2Machine(s.currentServerAddress) {
-		currentStage = Op2Stage
-	} else if args.FromStage == Op2Stage && s.command.Assignments.LeaderMachineAddress == s.currentServerAddress {
-		fmt.Print(args.Record.String(PROCESSED, 0))
-
-		*reply = true
-		return nil
-	} else {
-		*reply = false
-		return nil
-	}
-
 	// Check if record is duplicate
 	if _, ok := s.processedRecordIDs[args.Record.ID]; ok {
 		fmt.Printf("Duplicate record %s - not processing\n", args.Record.ID)
@@ -321,6 +296,22 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	}
 
 	s.processedRecordIDs[args.Record.ID] = struct{}{}
+
+	// Get the current stage
+	var currentStage Stage
+	if args.FromStage == SourceStage && s.command.Assignments.isOp1Machine(s.currentServerAddress) {
+		currentStage = Op1Stage
+	} else if args.FromStage == Op1Stage && s.command.Assignments.isOp2Machine(s.currentServerAddress) {
+		currentStage = Op2Stage
+	} else if args.FromStage == Op2Stage && s.command.Assignments.LeaderMachineAddress == s.currentServerAddress {
+		fmt.Print(args.Record.String(PROCESSED, 0))
+		s.outputBatchLogger.Append(args.Record.String(PROCESSED, 0))
+		*reply = true
+		return nil
+	} else {
+		*reply = false
+		return nil
+	}
 
 	// Log RECEIVED to DFS
 	s.operationsBatchLogger.Append(args.Record.String(RECEIVED, currentStage))
@@ -371,7 +362,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 	// Output each new record to next stage
 	for _, record := range records {
-		s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
 		go s.SendRecord(ProcessRecordArgs{currentStage, record})
 	}
 
@@ -384,6 +374,8 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 // OP1 -> OP2
 // OP2 -> Leader
 func (s *Server) SendRecord(args ProcessRecordArgs) {
+	s.operationsBatchLogger.Append(args.Record.String(OUTPUTTED, args.FromStage))
+
 	// Keep trying to send the record until you get an ack
 	for {
 		var nextStageServerAddress string
@@ -411,15 +403,8 @@ func (s *Server) SendRecord(args ProcessRecordArgs) {
 		}
 	}
 
-	// Output to output DFS file
-	if args.FromStage == Op2Stage {
-		s.outputBatchLogger.Append(args.Record.String(PROCESSED, 0))
-	}
-
 	// Log ACK to DFS
-	if args.FromStage != SourceStage {
-		s.operationsBatchLogger.Append(args.Record.String(ACKED, args.FromStage))
-	}
+	s.operationsBatchLogger.Append(args.Record.String(ACKED, args.FromStage))
 }
 
 // Soruce worker needs to process dfs file start sending data stream to OP1 workers
