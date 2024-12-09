@@ -229,8 +229,8 @@ func main() {
 				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, "")
 			}
 
+			// Kill two processes randomly
 			time.Sleep(1500 * time.Millisecond)
-
 			rainstormServer.KillRandom(2)
 
 		default:

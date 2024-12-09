@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// Variables ---------------------------------------------------
 const (
 	rpcPortNumber = "8003"
 )
@@ -39,6 +40,7 @@ type Server struct {
 	mu    sync.Mutex
 }
 
+// Init the new server
 func NewServer(dhtServer *dht.Server) *Server {
 	s := Server{
 		dhtServer:            dhtServer,
@@ -51,6 +53,7 @@ func NewServer(dhtServer *dht.Server) *Server {
 	return &s
 }
 
+// Listen for RPC commands
 func (s *Server) RunRPCServer() {
 	rpc.Register(s)
 	rpc.HandleHTTP()
@@ -62,6 +65,7 @@ func (s *Server) RunRPCServer() {
 	http.Serve(l, nil)
 }
 
+// Clear logs and state to prevent dirty data
 func (s *Server) resetState() {
 	s.dhtServer.Membership().OnRemoveMember(nil)
 
@@ -80,9 +84,12 @@ func (s *Server) resetState() {
 	clear(s.state)
 }
 
+// Starts RainStorm command (this function is only called on the leader)
 func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int, pattern string) {
+	// Make sure to start clean
 	s.resetState()
 
+	// Assign machines to be workers
 	machineAssignments := MachineAssignments{
 		membershipServer.CurrentServer().Address,
 		make([]string, numTasks),
@@ -105,6 +112,7 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 	fmt.Printf("Op1 machines: %v\n", machineAssignments.Op1MachineAddresses)
 	fmt.Printf("Op2 machines: %v\n", machineAssignments.Op2MachineAddresses)
 
+	// Format the RainStorm command for all workers
 	s.command = &Command{
 		uuid.NewString(),
 		op1Exe,
@@ -119,6 +127,7 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 	// Register callback
 	s.dhtServer.Membership().OnRemoveWorker(s.HandleFailedWorker)
 
+	// Assign tasks to all workers
 	var wg sync.WaitGroup
 	for _, member := range members {
 		wg.Add(1)
@@ -141,11 +150,14 @@ type SetCommandArgs struct {
 	Command Command
 }
 
+// Assings workers to a task (init worker)
 func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
+	// Clear old data
 	s.resetState()
 
 	s.mu.Lock()
 
+	// Init all loggers
 	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt", 100*time.Millisecond)
 	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
 		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile, 0)
@@ -155,6 +167,7 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 
 	s.mu.Unlock()
 
+	// Start up source workers to process dfs file
 	if s.command.Assignments.isSourceMachine(s.currentServerAddress) {
 		go s.Source()
 	}
@@ -167,6 +180,7 @@ type SetNewAssignmentsArgs struct {
 	NewAssignedTasks []Task
 }
 
+// Assign worker to a task from a failed worker
 func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{}) error {
 	s.mu.Lock()
 
@@ -239,7 +253,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 			}
 
 		}
-
+		// Check for state change logs
 		if len(matches) == 1 {
 			key := matches[0]
 
@@ -254,6 +268,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 		}
 	}
 
+	// Complete outputting all data if not done yet
 	for record, stage := range outputted {
 		switch stage {
 		case "SOURCE":
@@ -271,6 +286,8 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	return nil
 }
 
+// OP1 or OP2 worker function to process incoming data stream and call op.exe + process stream and
+// send output to appropriate stage
 func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	if s.command == nil {
 		*reply = false
@@ -279,6 +296,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 	s.mu.Lock()
 
+	// Get the current stage
 	var currentStage Stage
 	if args.FromStage == SourceStage && s.command.Assignments.isOp1Machine(s.currentServerAddress) {
 		currentStage = Op1Stage
@@ -324,6 +342,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		return nil
 	}
 
+	// Process op output
 	outSplit := strings.Split(strings.TrimSpace(string(out)), "\n")
 
 	// Could return nothing
@@ -335,26 +354,27 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 	var records []Record
 
-	if len(outSplit) == 1 {
+	if len(outSplit) == 1 { // COUNT OPERATOR
 		if outSplit[0] == "" {
 			*reply = true
 			s.mu.Unlock()
 			return nil
 		}
 		records = make([]Record, 1)
-
+		// Update and log state change
 		s.state[outSplit[0]] = s.state[outSplit[0]] + 1
 		records[0] = Record{uuid.NewString(), outSplit[0], strconv.Itoa(s.state[outSplit[0]])}
 
 		stateChange := fmt.Sprintf("%s\n", args.Record.Key)
 		s.operationsBatchLogger.Append(stateChange)
-	} else {
+	} else { // TRANSFORM OPERATOR
 		records = make([]Record, len(outSplit)/2)
 		for i := 0; i < len(outSplit); i += 2 {
 			records[i/2] = Record{uuid.NewString(), outSplit[i], outSplit[i+1]}
 		}
 	}
 
+	// Output each new record to next stage
 	for _, record := range records {
 		s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
 		go s.SendRecord(ProcessRecordArgs{currentStage, record})
@@ -365,7 +385,12 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	return nil
 }
 
+// Sends records from one stage onto the next based on current stage
+// SOURCE -> OP1
+// OP1 -> OP2
+// OP2 -> Leader
 func (s *Server) SendRecord(args ProcessRecordArgs) {
+	// Keep trying to send the record until you get an ack
 	for {
 		var nextStageServerAddress string
 		switch args.FromStage {
@@ -403,6 +428,7 @@ func (s *Server) SendRecord(args ProcessRecordArgs) {
 	}
 }
 
+// Soruce worker needs to process dfs file start sending data stream to OP1 workers
 func (s *Server) Source() {
 	// Get hydfs file
 	localFileName := "source.txt"
@@ -422,11 +448,13 @@ func (s *Server) Source() {
 	scanner := bufio.NewScanner(file)
 	lineNumber := 0
 
+	// Process each line in the file
 	for scanner.Scan() {
 		line := scanner.Text()
 		lineNumber++
 		hashLine := util.HashLine(line)
 
+		// Only look at lines that hash to source workers's indexes
 		if slices.Contains(indexes, hashLine%s.command.NumTasks) {
 			// Format record
 			key := fmt.Sprintf("%s:%s", s.command.HydfsSrcFile, strconv.Itoa(lineNumber))
@@ -440,6 +468,7 @@ func (s *Server) Source() {
 	}
 }
 
+// Registered callback - Called by leader when a node fails
 func (s *Server) HandleFailedWorker(failedAddress string) {
 	if s.command == nil {
 		return
@@ -494,6 +523,7 @@ func (s *Server) HandleFailedWorker(failedAddress string) {
 	wg.Wait()
 }
 
+// Finds a new worker by picking the one with the least amount of work
 func (s *Server) findNewWorker(failedAddress string) string {
 	taskCount := make(map[string]int)
 
@@ -507,6 +537,7 @@ func (s *Server) findNewWorker(failedAddress string) string {
 		taskCount[address]++
 	}
 
+	// Failed address shouldn't be picked
 	delete(taskCount, failedAddress)
 
 	type Machine struct {
@@ -514,12 +545,14 @@ func (s *Server) findNewWorker(failedAddress string) string {
 		address   string
 	}
 
+	// Get each machines's task count
 	addressToTaskCount := make([]Machine, 0)
 
 	for address, taskCount := range taskCount {
 		addressToTaskCount = append(addressToTaskCount, Machine{taskCount, address})
 	}
 
+	// Sort the counts and pick the smallest count
 	sort.Slice(addressToTaskCount, func(i, j int) bool {
 		return addressToTaskCount[i].taskCount < addressToTaskCount[j].taskCount
 	})
@@ -527,6 +560,7 @@ func (s *Server) findNewWorker(failedAddress string) string {
 	return addressToTaskCount[0].address
 }
 
+// Kills the current machine - part of demo script
 func (s *Server) Kill(args *struct{}, reply *struct{}) error {
 	go func() {
 		time.Sleep(200 * time.Millisecond)
@@ -536,14 +570,17 @@ func (s *Server) Kill(args *struct{}, reply *struct{}) error {
 	return nil
 }
 
+// Kills x amount of random machine - part of demo script
 func (s *Server) KillRandom(count int) {
 	members := s.dhtServer.Membership().Members()
 	killed := 0
 	for _, m := range members {
+		// Prevent killing source machines
 		if s.command.Assignments.isSourceMachine(m.Address) {
 			continue
 		}
 
+		// Only kill OP1 or OP2 machines
 		if s.command.Assignments.isOp1Machine(m.Address) || s.command.Assignments.isOp2Machine(m.Address) {
 			fmt.Println("Killing server", m.Address)
 			util.RpcCall(m.Address, rpcPortNumber, "Server.Kill", &struct{}{}, &struct{}{})

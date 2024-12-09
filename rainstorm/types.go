@@ -24,6 +24,7 @@ type MachineAssignments struct {
 	Op2MachineAddresses    []string
 }
 
+// Returns if address part of assignment
 func (m *MachineAssignments) isSourceMachine(address string) bool {
 	return slices.Contains(m.SourceMachineAddresses, address)
 }
@@ -70,6 +71,7 @@ type ProcessRecordArgs struct {
 	Record    Record
 }
 
+// Formats record into string based on status
 func (r *Record) String(status RecordStatus, currentStage Stage) string {
 	if status != PROCESSED {
 		return fmt.Sprintf("%s⟁%s⟁%s⟁%s⟁%s\n", r.ID, status, currentStage, r.Key, r.Value)

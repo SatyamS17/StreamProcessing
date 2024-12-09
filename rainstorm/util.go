@@ -1,5 +1,6 @@
 package rainstorm
 
+// Used to get all indexes(tasks) that a machine/worker is assigned
 func (s *Server) GetTaskIndexesFromAddress(addresses []string, address string) []int {
 	var indexes []int
 	for key, value := range addresses {
@@ -10,6 +11,7 @@ func (s *Server) GetTaskIndexesFromAddress(addresses []string, address string) [
 	return indexes
 }
 
+// Convert RecordStatus enum to string
 func (status RecordStatus) String() string {
 	switch status {
 	case RECEIVED:
@@ -23,6 +25,7 @@ func (status RecordStatus) String() string {
 	}
 }
 
+// Convert Stage enum to string
 func (status Stage) String() string {
 	switch status {
 	case SourceStage:
