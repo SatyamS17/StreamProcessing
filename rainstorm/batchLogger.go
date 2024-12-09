@@ -18,7 +18,8 @@ type BatchLogger struct {
 
 	mu sync.Mutex
 
-	stop chan struct{}
+	stop    chan struct{}
+	stopped bool
 }
 
 func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
@@ -60,6 +61,10 @@ func (b *BatchLogger) Append(data string) {
 		return
 	}
 
+	if b.stopped {
+		log.Fatal("Appending to stopped logger")
+	}
+
 	b.mu.Lock()
 	f, err := os.OpenFile(b.localFileName, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -77,6 +82,8 @@ func (b *BatchLogger) Append(data string) {
 func (b *BatchLogger) Stop() {
 	b.flush()
 	b.stop <- struct{}{}
+	b.stopped = true
+	os.Remove(b.localFileName)
 }
 
 func (b *BatchLogger) flush() {
