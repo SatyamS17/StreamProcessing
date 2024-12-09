@@ -148,7 +148,7 @@ func RpcCall(address string, portNum string, function string, args any, reply an
 	select {
 	case call := <-call.Done:
 		return call.Error
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		return fmt.Errorf("timed out")
 	}
 }

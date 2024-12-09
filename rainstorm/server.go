@@ -134,9 +134,13 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 		go func() {
 			defer wg.Done()
 			args := &SetCommandArgs{*s.command}
-			err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetCommand", args, &struct{}{})
-			if err != nil {
-				fmt.Println(err)
+			for {
+				err := util.RpcCall(member.Address, rpcPortNumber, "Server.SetCommand", args, &struct{}{})
+				if err != nil {
+					fmt.Println(err)
+				} else {
+					break
+				}
 			}
 		}()
 	}
@@ -156,16 +160,15 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 	s.resetState()
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Init all loggers
-	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt", 100*time.Millisecond)
+	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt", 0)
 	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
 		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile, 0)
 	}
 
 	s.command = &args.Command
-
-	s.mu.Unlock()
 
 	// Start up source workers to process dfs file
 	if s.command.Assignments.isSourceMachine(s.currentServerAddress) {
@@ -183,15 +186,14 @@ type SetNewAssignmentsArgs struct {
 // Assign worker to a task from a failed worker
 func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{}) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.command.Assignments = args.NewAssignments
-	fmt.Println("new assignments", s.command.Assignments)
 
 	fmt.Println("New tasks", args.NewAssignedTasks)
 
 	// Check if we were assigned any new tasks. If so, we have to parse through the ops log
 	if len(args.NewAssignedTasks) == 0 {
-		s.mu.Unlock()
 		return nil
 	}
 
@@ -210,7 +212,6 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	file, err := os.Open(localFileName)
 	if err != nil {
 		fmt.Printf("Error opening file: %v\n", err)
-		s.mu.Unlock()
 		return nil
 	}
 	defer file.Close()
@@ -282,7 +283,6 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 		}
 	}
 
-	s.mu.Unlock()
 	return nil
 }
 
@@ -295,6 +295,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	}
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Get the current stage
 	var currentStage Stage
@@ -305,11 +306,9 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	} else if args.FromStage == Op2Stage && s.command.Assignments.LeaderMachineAddress == s.currentServerAddress {
 		fmt.Print(args.Record.String(PROCESSED, 0))
 
-		s.mu.Unlock()
 		*reply = true
 		return nil
 	} else {
-		s.mu.Unlock()
 		*reply = false
 		return nil
 	}
@@ -317,7 +316,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	// Check if record is duplicate
 	if _, ok := s.processedRecordIDs[args.Record.ID]; ok {
 		fmt.Printf("Duplicate record %s - not processing\n", args.Record.ID)
-		s.mu.Unlock()
 		*reply = true
 		return nil
 	}
@@ -337,7 +335,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 	if err != nil {
 		fmt.Println(err)
-		s.mu.Unlock()
 		*reply = true
 		return nil
 	}
@@ -348,7 +345,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	// Could return nothing
 	if len(outSplit) < 1 {
 		*reply = true
-		s.mu.Unlock()
 		return nil
 	}
 
@@ -357,7 +353,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	if len(outSplit) == 1 { // COUNT OPERATOR
 		if outSplit[0] == "" {
 			*reply = true
-			s.mu.Unlock()
 			return nil
 		}
 		records = make([]Record, 1)
@@ -380,7 +375,6 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		go s.SendRecord(ProcessRecordArgs{currentStage, record})
 	}
 
-	s.mu.Unlock()
 	*reply = true
 	return nil
 }

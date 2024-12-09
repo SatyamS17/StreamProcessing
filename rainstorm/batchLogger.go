@@ -75,6 +75,8 @@ func (b *BatchLogger) Append(data string) {
 
 	// Write to local file
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	f, err := os.OpenFile(b.localFileName, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal(err)
@@ -85,7 +87,6 @@ func (b *BatchLogger) Append(data string) {
 	if err := f.Close(); err != nil {
 		log.Fatal(err)
 	}
-	b.mu.Unlock()
 
 	// Check if we want to flush instantly
 	if b.flushPeriod == 0 {
@@ -95,17 +96,18 @@ func (b *BatchLogger) Append(data string) {
 
 // Closes the logger
 func (b *BatchLogger) Stop() {
+	b.mu.Lock()
 	b.flush()
-	b.stop <- struct{}{}
+	b.mu.Unlock()
+	if b.flushPeriod > 0 {
+		b.stop <- struct{}{}
+	}
 	b.stopped = true
 	os.Remove(b.localFileName)
 }
 
 // Copies all local file data to dfs file (clears local file)
 func (b *BatchLogger) flush() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	fi, err := os.Stat(b.localFileName)
 	if err != nil {
 		return
