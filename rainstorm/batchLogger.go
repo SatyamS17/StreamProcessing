@@ -9,12 +9,11 @@ import (
 	"time"
 )
 
-const flushPeriod = 100 * time.Millisecond
-
 type BatchLogger struct {
 	dhtServer     *dht.Server
 	dfsFileName   string
 	localFileName string
+	flushPeriod   time.Duration
 
 	mu sync.Mutex
 
@@ -22,11 +21,12 @@ type BatchLogger struct {
 	stopped bool
 }
 
-func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
+func NewBatchLogger(dhtServer *dht.Server, dfsFileName string, flushPeriod time.Duration) *BatchLogger {
 	b := BatchLogger{
 		dhtServer:     dhtServer,
 		dfsFileName:   dfsFileName,
 		localFileName: dfsFileName + ".tmp",
+		flushPeriod:   flushPeriod,
 		stop:          make(chan struct{}),
 	}
 
@@ -39,17 +39,19 @@ func NewBatchLogger(dhtServer *dht.Server, dfsFileName string) *BatchLogger {
 
 	dhtServer.Create(b.localFileName, b.dfsFileName)
 
-	go func() {
-		for {
-			select {
-			case <-b.stop:
-				return
-			default:
-				b.flush()
-				time.Sleep(flushPeriod)
+	if b.flushPeriod > 0 {
+		go func() {
+			for {
+				select {
+				case <-b.stop:
+					return
+				default:
+					b.flush()
+					time.Sleep(b.flushPeriod)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return &b
 }
@@ -77,6 +79,10 @@ func (b *BatchLogger) Append(data string) {
 		log.Fatal(err)
 	}
 	b.mu.Unlock()
+
+	if b.flushPeriod == 0 {
+		b.flush()
+	}
 }
 
 func (b *BatchLogger) Stop() {

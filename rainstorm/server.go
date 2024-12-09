@@ -146,9 +146,9 @@ func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
 
 	s.mu.Lock()
 
-	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt")
+	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt", 100*time.Millisecond)
 	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
-		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile)
+		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile, 0)
 	}
 
 	s.command = &args.Command
@@ -184,7 +184,7 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	// If we weren't op2 before but now we are, init the output batch logger
 	for _, task := range args.NewAssignedTasks {
 		if task.Stage == Op2Stage && s.outputBatchLogger == nil {
-			s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile)
+			s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile, 0)
 			break
 		}
 	}
@@ -319,6 +319,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 
 	if err != nil {
 		fmt.Println(err)
+		s.mu.Unlock()
 		*reply = true
 		return nil
 	}
@@ -328,6 +329,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	// Could return nothing
 	if len(outSplit) < 1 {
 		*reply = true
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -336,6 +338,7 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 	if len(outSplit) == 1 {
 		if outSplit[0] == "" {
 			*reply = true
+			s.mu.Unlock()
 			return nil
 		}
 		records = make([]Record, 1)
@@ -522,4 +525,32 @@ func (s *Server) findNewWorker(failedAddress string) string {
 	})
 
 	return addressToTaskCount[0].address
+}
+
+func (s *Server) Kill(args *struct{}, reply *struct{}) error {
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		fmt.Println("Killed")
+		os.Exit(0)
+	}()
+	return nil
+}
+
+func (s *Server) KillRandom(count int) {
+	members := s.dhtServer.Membership().Members()
+	killed := 0
+	for _, m := range members {
+		if s.command.Assignments.isSourceMachine(m.Address) {
+			continue
+		}
+
+		if s.command.Assignments.isOp1Machine(m.Address) || s.command.Assignments.isOp2Machine(m.Address) {
+			fmt.Println("Killing server", m.Address)
+			util.RpcCall(m.Address, rpcPortNumber, "Server.Kill", &struct{}{}, &struct{}{})
+			killed++
+			if killed == count {
+				return
+			}
+		}
+	}
 }

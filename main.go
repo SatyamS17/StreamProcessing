@@ -211,6 +211,27 @@ func main() {
 			} else { // No pattern
 				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, "")
 			}
+		case "RainStormWithFail":
+			if len(text) < 6 {
+				fmt.Println("Missing parameters")
+				continue
+			}
+
+			numTasks, err := strconv.Atoi(text[5])
+			if err != nil {
+				fmt.Println("Invalid numTasks")
+				continue
+			}
+
+			if len(text) > 6 { // Have a pattern
+				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, text[6])
+			} else { // No pattern
+				rainstormServer.Run(membershipServer, text[1], text[2], text[3], text[4], numTasks, "")
+			}
+
+			time.Sleep(1500 * time.Millisecond)
+
+			rainstormServer.KillRandom(2)
 
 		default:
 			fmt.Printf("Invalid command\n")
