@@ -37,15 +37,19 @@ type Server struct {
 	outputBatchLogger     *BatchLogger
 	operationsBatchLogger *BatchLogger
 
-	prevStageMachinesDone int
-
 	state map[string]int
-
-	mu sync.Mutex
+	mu    sync.Mutex
 }
 
 func NewServer(dhtServer *dht.Server) *Server {
-	s := Server{dhtServer, dhtServer.GetCurrentServerAddress(), nil, make(map[string]struct{}), nil, nil, 0, make(map[string]int), sync.Mutex{}}
+	s := Server{
+		dhtServer:            dhtServer,
+		currentServerAddress: dhtServer.GetCurrentServerAddress(),
+		command:              nil,
+		processedRecordIDs:   make(map[string]struct{}),
+		state:                make(map[string]int),
+	}
+
 	return &s
 }
 
@@ -60,7 +64,24 @@ func (s *Server) RunRPCServer() {
 	http.Serve(l, nil)
 }
 
+func (s *Server) resetState() {
+	s.dhtServer.Membership().OnRemoveMember(nil)
+
+	s.command = nil
+	clear(s.processedRecordIDs)
+	if s.outputBatchLogger != nil {
+		s.outputBatchLogger.Stop()
+		s.outputBatchLogger = nil
+	}
+	if s.operationsBatchLogger != nil {
+		s.operationsBatchLogger.Stop()
+		s.operationsBatchLogger = nil
+	}
+}
+
 func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe string, hydfsSrcFile string, hydfsDestFile string, numTasks int, pattern string) {
+	s.resetState()
+
 	machineAssignments := MachineAssignments{
 		membershipServer.CurrentServer().Address,
 		make([]string, numTasks),
@@ -113,7 +134,6 @@ func (s *Server) Run(membershipServer *membership.Server, op1Exe string, op2Exe 
 	wg.Wait()
 
 	fmt.Println("Assigned tasks to all workers")
-
 }
 
 type SetCommandArgs struct {
@@ -121,9 +141,10 @@ type SetCommandArgs struct {
 }
 
 func (s *Server) SetCommand(args *SetCommandArgs, reply *struct{}) error {
+	s.resetState()
+
 	s.mu.Lock()
 
-	fmt.Println(args.Command.ID + "_ops.txt")
 	s.operationsBatchLogger = NewBatchLogger(s.dhtServer, args.Command.ID+"_ops.txt")
 	if args.Command.Assignments.isOp2Machine(s.currentServerAddress) {
 		s.outputBatchLogger = NewBatchLogger(s.dhtServer, args.Command.HydfsDestFile)
@@ -156,6 +177,14 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 	if len(args.NewAssignedTasks) == 0 {
 		s.mu.Unlock()
 		return nil
+	}
+
+	// If we weren't op2 before but now we are, init the output batch logger
+	for _, task := range args.NewAssignedTasks {
+		if task.Stage == Op2Stage && s.outputBatchLogger == nil {
+			s.outputBatchLogger = NewBatchLogger(s.dhtServer, s.command.HydfsDestFile)
+			break
+		}
 	}
 
 	// Parse log file and find all work that still needs to be done from the old failed machine
@@ -243,35 +272,10 @@ func (s *Server) SetNewAssignments(args *SetNewAssignmentsArgs, reply *struct{})
 			fmt.Println("oops")
 		case "OP1":
 			fmt.Println("Resending to OP2")
-			for {
-				nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
-				args := ProcessRecordArgs{Op1Stage, record}
-				var ok bool
-				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
-				if err != nil || !ok {
-					fmt.Println(err)
-					time.Sleep(500 * time.Millisecond)
-				} else {
-					break
-				}
-			}
-
-			// Log ACK to DFS
-			s.operationsBatchLogger.Append(record.String(ACKED, Op1Stage))
+			go s.SendRecord(ProcessRecordArgs{Op1Stage, record})
 		case "OP2":
 			fmt.Println("Resending to leader")
-			// Send record to leader
-			args := OutputRecordArgs{record}
-			err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
-			if err != nil {
-				fmt.Println(err)
-			}
-
-			// Log to output file
-			s.outputBatchLogger.Append(record.String(PROCESSED, 0))
-
-			// Log ACK to DFS
-			s.operationsBatchLogger.Append(record.String(ACKED, Op2Stage))
+			go s.SendRecord(ProcessRecordArgs{Op2Stage, record})
 		}
 	}
 
@@ -290,6 +294,10 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		currentStage = Op1Stage
 	} else if args.FromStage == Op1Stage && s.command.Assignments.isOp2Machine(s.currentServerAddress) {
 		currentStage = Op2Stage
+	} else if args.FromStage == Op2Stage && s.command.Assignments.LeaderMachineAddress == s.currentServerAddress {
+		fmt.Print(args.Record.String(PROCESSED, 0))
+		*reply = true
+		return nil
 	} else {
 		*reply = false
 		return nil
@@ -346,55 +354,51 @@ func (s *Server) ProcessRecord(args *ProcessRecordArgs, reply *bool) error {
 		}
 	}
 
-	go func() {
-		if currentStage == Op1Stage {
-			for _, record := range records {
-				// Log OUTPUTTED to DFS
-				s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
-
-				// Send record to op2
-				for {
-					nextStageServerAddress := s.command.Assignments.Op2MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
-					args := ProcessRecordArgs{currentStage, record}
-					var ok bool
-					fmt.Printf("Sending key %s to op2\n", record.Key)
-					err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
-					if err != nil || !ok {
-						fmt.Println(err)
-						time.Sleep(500 * time.Millisecond)
-					} else {
-						fmt.Printf("Sent key %s\n", record.Key)
-						break
-					}
-				}
-
-				// Log ACK to DFS
-				s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
-			}
-		} else if currentStage == Op2Stage {
-			for _, record := range records {
-				// Log OUTPUTTED to DFS
-				s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
-
-				// Send record to leader
-				args := OutputRecordArgs{record}
-				fmt.Printf("Sending key %s to leader\n", record.Key)
-				err := util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.OutputRecord", args, &struct{}{})
-				if err != nil {
-					fmt.Println(err)
-				}
-
-				// Log to output file
-				s.outputBatchLogger.Append(record.String(PROCESSED, 0))
-
-				// Log ACK to DFS
-				s.operationsBatchLogger.Append(record.String(ACKED, currentStage))
-			}
-		}
-	}()
+	for _, record := range records {
+		s.operationsBatchLogger.Append(record.String(OUTPUTTED, currentStage))
+		go s.SendRecord(ProcessRecordArgs{currentStage, record})
+	}
 
 	*reply = true
 	return nil
+}
+
+func (s *Server) SendRecord(args ProcessRecordArgs) {
+	for {
+		var nextStageServerAddress string
+		switch args.FromStage {
+		case SourceStage:
+			nextStageServerAddress = s.command.Assignments.Op1MachineAddresses[util.Hash(args.Record.Key)%s.command.NumTasks]
+			fmt.Printf("Sending key %s to op1\n", args.Record.Key)
+		case Op1Stage:
+			nextStageServerAddress = s.command.Assignments.Op2MachineAddresses[util.Hash(args.Record.Key)%s.command.NumTasks]
+			fmt.Printf("Sending key %s to op2\n", args.Record.Key)
+		case Op2Stage:
+			nextStageServerAddress = s.command.Assignments.LeaderMachineAddress
+			fmt.Printf("Sending key %s to leader\n", args.Record.Key)
+		}
+
+		var ok bool
+
+		err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
+
+		if err != nil || !ok {
+			fmt.Println(err)
+			time.Sleep(500 * time.Millisecond)
+		} else {
+			break
+		}
+	}
+
+	// Output to output DFS file
+	if args.FromStage == Op2Stage {
+		s.outputBatchLogger.Append(args.Record.String(PROCESSED, 0))
+	}
+
+	// Log ACK to DFS
+	if args.FromStage != SourceStage {
+		s.operationsBatchLogger.Append(args.Record.String(ACKED, args.FromStage))
+	}
 }
 
 func (s *Server) Source() {
@@ -421,81 +425,17 @@ func (s *Server) Source() {
 		lineNumber++
 		hashLine := util.HashLine(line)
 
-		// go func() { // TODO: WILL THIS BREAK SHIT?
 		if slices.Contains(indexes, hashLine%s.command.NumTasks) {
 			// Format record
 			key := fmt.Sprintf("%s:%s", s.command.HydfsSrcFile, strconv.Itoa(lineNumber))
 			record := Record{uuid.NewString(), key, line}
-
-			// Use hash to send to right machine
-			for {
-				nextStageServerAddress := s.command.Assignments.Op1MachineAddresses[util.Hash(record.Key)%s.command.NumTasks]
-				args := ProcessRecordArgs{SourceStage, record}
-				var ok bool
-				fmt.Printf("Sending key %s to op1\n", record.Key)
-				err := util.RpcCall(nextStageServerAddress, rpcPortNumber, "Server.ProcessRecord", args, &ok)
-
-				if err != nil || !ok {
-					fmt.Println(err, ok)
-					time.Sleep(500 * time.Millisecond)
-				} else {
-					break
-				}
-			}
+			s.SendRecord(ProcessRecordArgs{SourceStage, record})
 		}
-		// }()
 	}
 
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("Error reading file: %v\n", err)
 	}
-
-	// for _, machine := range s.command.Assignments.Op1MachineAddresses {
-	// 	util.RpcCall(machine, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
-	// }
-}
-
-func (s *Server) OutputRecord(args *OutputRecordArgs, reply *struct{}) error {
-	fmt.Print(args.Record.String(PROCESSED, 0))
-	return nil
-}
-
-func (s *Server) MarkPrevStageMachineDone(args *struct{}, reply *struct{}) error {
-	s.prevStageMachinesDone++
-
-	if s.prevStageMachinesDone == s.command.NumTasks {
-		// Forward to next stage
-		if s.command.Assignments.isOp1Machine(s.dhtServer.GetCurrentServerAddress()) {
-			for _, machine := range s.command.Assignments.Op2MachineAddresses {
-				util.RpcCall(machine, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
-			}
-		} else if s.command.Assignments.isOp2Machine(s.dhtServer.GetCurrentServerAddress()) {
-			util.RpcCall(s.command.Assignments.LeaderMachineAddress, rpcPortNumber, "Server.MarkPrevStageMachineDone", &struct{}{}, &struct{}{})
-		}
-
-		if s.outputBatchLogger != nil {
-			s.outputBatchLogger.Stop()
-			s.outputBatchLogger = nil
-		}
-
-		if s.operationsBatchLogger != nil {
-			s.operationsBatchLogger.Stop()
-			s.operationsBatchLogger = nil
-		}
-
-		if s.command.Assignments.LeaderMachineAddress == s.dhtServer.GetCurrentServerAddress() {
-			// Remove callback
-			s.dhtServer.Membership().OnRemoveMember(nil)
-			fmt.Println("Done")
-		}
-
-		// Reset internal state
-		s.command = nil
-		s.prevStageMachinesDone = 0
-		clear(s.processedRecordIDs)
-	}
-
-	return nil
 }
 
 func (s *Server) HandleFailedWorker(failedAddress string) {

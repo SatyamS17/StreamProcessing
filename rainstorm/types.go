@@ -36,10 +36,6 @@ func (m *MachineAssignments) isOp2Machine(address string) bool {
 	return slices.Contains(m.Op2MachineAddresses, address)
 }
 
-func (m *MachineAssignments) isAssigned(address string) bool {
-	return m.isSourceMachine(address) || m.isOp1Machine(address) || m.isOp2Machine(address)
-}
-
 type Stage int
 
 const (
@@ -68,10 +64,6 @@ const (
 
 	PROCESSED
 )
-
-type OutputRecordArgs struct {
-	Record Record
-}
 
 type ProcessRecordArgs struct {
 	FromStage Stage
