@@ -50,7 +50,9 @@ func NewBatchLogger(dhtServer *dht.Server, dfsFileName string, flushPeriod time.
 				case <-b.stop:
 					return
 				default:
+					b.mu.Lock()
 					b.flush()
+					b.mu.Unlock()
 					time.Sleep(b.flushPeriod)
 				}
 			}
