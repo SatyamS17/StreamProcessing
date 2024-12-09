@@ -10,7 +10,7 @@ import sys
 
 key = sys.argv[1]
 value = sys.argv[2]
-pattern = sys.argv[5]
+pattern = sys.argv[3]
 
 values = value.split(",")
 
